@@ -311,7 +311,11 @@ function claudeCommand() {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error)
+  const message = error instanceof Error ? error.message : String(error)
+  if (message.trim() === "Authentication required") {
+    return "Claude Code authentication required. Run `claude auth login` in a normal terminal, then retry in OpenCode."
+  }
+  return message
 }
 
 function abortError() {
