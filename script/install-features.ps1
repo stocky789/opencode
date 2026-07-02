@@ -111,14 +111,15 @@ Info "Installing dependencies"
 
 $PackageDir = Join-Path $SourceDir "packages\opencode"
 $EntryPoint = Join-Path $PackageDir "src\index.ts"
+$BunConfig = Join-Path $PackageDir "bunfig.toml"
 $LauncherCmd = @"
 @echo off
 setlocal
-"$Bun" --conditions=browser "$EntryPoint" %*
+"$Bun" --config "$BunConfig" --conditions=browser "$EntryPoint" %*
 "@
 
 $LauncherPs1 = @"
-& "$Bun" --conditions=browser "$EntryPoint" @args
+& "$Bun" --config "$BunConfig" --conditions=browser "$EntryPoint" @args
 "@
 
 Set-Content -LiteralPath (Join-Path $BinDir "opencode.cmd") -Value $LauncherCmd -NoNewline -Encoding ascii

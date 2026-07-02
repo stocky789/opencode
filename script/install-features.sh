@@ -61,15 +61,16 @@ info "Installing dependencies"
 
 package_dir="$source_dir/packages/opencode"
 entrypoint="$package_dir/src/index.ts"
+bun_config="$package_dir/bunfig.toml"
 
 cat > "$bin_dir/opencode-features" <<EOF
 #!/usr/bin/env sh
-exec "$bun_bin" --conditions=browser "$entrypoint" "\$@"
+exec "$bun_bin" --config "$bun_config" --conditions=browser "$entrypoint" "\$@"
 EOF
 
 cat > "$bin_dir/opencode" <<EOF
 #!/usr/bin/env sh
-exec "$bun_bin" --conditions=browser "$entrypoint" "\$@"
+exec "$bun_bin" --config "$bun_config" --conditions=browser "$entrypoint" "\$@"
 EOF
 
 chmod 755 "$bin_dir/opencode-features" "$bin_dir/opencode"
