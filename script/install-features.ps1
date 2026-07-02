@@ -110,16 +110,16 @@ Info "Installing dependencies"
 & $Bun install --cwd $SourceDir
 
 $PackageDir = Join-Path $SourceDir "packages\opencode"
-$EntryPoint = Join-Path $PackageDir "src\index.ts"
-$BunConfig = Join-Path $PackageDir "bunfig.toml"
 $LauncherCmd = @"
 @echo off
 setlocal
-"$Bun" --config "$BunConfig" --conditions=browser "$EntryPoint" %*
+set "OPENCODE_LAUNCH_CWD=%CD%"
+"$Bun" run --cwd "$PackageDir" --conditions=browser src/index.ts %*
 "@
 
 $LauncherPs1 = @"
-& "$Bun" --config "$BunConfig" --conditions=browser "$EntryPoint" @args
+`$env:OPENCODE_LAUNCH_CWD = (Get-Location).ProviderPath
+& "$Bun" run --cwd "$PackageDir" --conditions=browser src/index.ts @args
 "@
 
 Set-Content -LiteralPath (Join-Path $BinDir "opencode.cmd") -Value $LauncherCmd -NoNewline -Encoding ascii
