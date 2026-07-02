@@ -110,14 +110,15 @@ Info "Installing dependencies"
 & $Bun install --cwd $SourceDir
 
 $PackageDir = Join-Path $SourceDir "packages\opencode"
+$EntryPoint = Join-Path $PackageDir "src\index.ts"
 $LauncherCmd = @"
 @echo off
 setlocal
-"$Bun" run --cwd "$PackageDir" --conditions=browser src/index.ts %*
+"$Bun" --conditions=browser "$EntryPoint" %*
 "@
 
 $LauncherPs1 = @"
-& "$Bun" run --cwd "$PackageDir" --conditions=browser src/index.ts @args
+& "$Bun" --conditions=browser "$EntryPoint" @args
 "@
 
 Set-Content -LiteralPath (Join-Path $BinDir "opencode.cmd") -Value $LauncherCmd -NoNewline -Encoding ascii

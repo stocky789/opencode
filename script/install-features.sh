@@ -60,15 +60,16 @@ info "Installing dependencies"
 "$bun_bin" install --cwd "$source_dir"
 
 package_dir="$source_dir/packages/opencode"
+entrypoint="$package_dir/src/index.ts"
 
 cat > "$bin_dir/opencode-features" <<EOF
 #!/usr/bin/env sh
-exec "$bun_bin" run --cwd "$package_dir" --conditions=browser src/index.ts "\$@"
+exec "$bun_bin" --conditions=browser "$entrypoint" "\$@"
 EOF
 
 cat > "$bin_dir/opencode" <<EOF
 #!/usr/bin/env sh
-exec "$bun_bin" run --cwd "$package_dir" --conditions=browser src/index.ts "\$@"
+exec "$bun_bin" --conditions=browser "$entrypoint" "\$@"
 EOF
 
 chmod 755 "$bin_dir/opencode-features" "$bin_dir/opencode"
