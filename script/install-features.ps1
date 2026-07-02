@@ -45,14 +45,11 @@ function Require-Command($Name, $InstallHint) {
   throw "$Name is required. $InstallHint"
 }
 
-function Ensure-Bun {
+function Find-Bun {
   $bun = Get-Command bun -ErrorAction SilentlyContinue
   if ($bun) {
     return $bun.Source
   }
-
-  Info "Installing Bun"
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm bun.sh/install.ps1 | iex"
 
   $candidates = @(
     (Join-Path $env:USERPROFILE ".bun\bin\bun.exe"),
@@ -64,10 +61,20 @@ function Ensure-Bun {
       return $candidate
     }
   }
+}
 
-  $bun = Get-Command bun -ErrorAction SilentlyContinue
+function Ensure-Bun {
+  $bun = Find-Bun
   if ($bun) {
-    return $bun.Source
+    return $bun
+  }
+
+  Info "Installing Bun"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm bun.sh/install.ps1 | iex" | Out-Host
+
+  $bun = Find-Bun
+  if ($bun) {
+    return $bun
   }
 
   throw "Bun installed, but bun.exe was not found. Restart the terminal and rerun this installer."
@@ -91,6 +98,10 @@ function Add-UserPath($PathToAdd) {
 
 Require-Command "git" "Install Git for Windows, then rerun this command: winget install --id Git.Git -e"
 $Bun = Ensure-Bun
+$BunDir = Split-Path -Parent $Bun
+if (($env:Path -split ";") -notcontains $BunDir) {
+  $env:Path = "$BunDir;$env:Path"
+}
 
 New-Item -ItemType Directory -Force -Path $InstallRoot, $BinDir | Out-Null
 

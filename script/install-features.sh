@@ -8,7 +8,7 @@ source_dir="$install_root/source"
 bin_dir="${OPENCODE_FEATURES_BIN_DIR:-$HOME/.local/bin}"
 
 info() {
-  printf '[opencode features] %s\n' "$1"
+  printf '[opencode features] %s\n' "$1" >&2
 }
 
 require_command() {
@@ -19,27 +19,46 @@ require_command() {
   exit 1
 }
 
-ensure_bun() {
+find_bun() {
   if command -v bun >/dev/null 2>&1; then
     command -v bun
     return 0
   fi
 
+  for candidate in "${BUN_INSTALL:-$HOME/.bun}/bin/bun" "$HOME/.bun/bin/bun"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_bun() {
+  if find_bun; then
+    return 0
+  fi
+
   require_command curl "Install curl with your system package manager, then rerun this installer."
   info "Installing Bun"
-  curl -fsSL https://bun.sh/install | bash
-  export PATH="$HOME/.bun/bin:$PATH"
+  curl -fsSL https://bun.sh/install | bash >&2
+  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+  export PATH="$BUN_INSTALL/bin:$PATH"
 
-  if ! command -v bun >/dev/null 2>&1; then
+  if ! find_bun; then
     printf 'Error: Bun installed, but bun was not found. Restart the shell and rerun this installer.\n' >&2
     exit 1
   fi
-
-  command -v bun
 }
 
 require_command git "Install git with your system package manager, then rerun this installer."
 bun_bin="$(ensure_bun)"
+bun_dir="$(dirname "$bun_bin")"
+case ":$PATH:" in
+  *":$bun_dir:"*) ;;
+  *) export PATH="$bun_dir:$PATH" ;;
+esac
 
 mkdir -p "$install_root" "$bin_dir"
 
