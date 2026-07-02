@@ -1,7 +1,10 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
+import type { McpServer } from "@agentclientprotocol/sdk"
+import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { Provider } from "@/provider/provider"
+import { ClaudeACPProviderID, Provider } from "@/provider/provider"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
@@ -27,6 +30,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
+import { ClaudeACP } from "./llm/claude-acp"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
 
@@ -34,7 +38,7 @@ export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
 export type StreamInput = {
   user: SessionV1.User
-  sessionID: string
+  sessionID: SessionID
   parentSessionID?: string
   model: Provider.Model
   agent: Agent.Info
@@ -91,6 +95,31 @@ const live: Layer.Layer<
         agent: input.agent.name,
         mode: input.agent.mode,
       })
+
+      if (input.model.providerID === ClaudeACPProviderID) {
+        const cfg = yield* config.get()
+        yield* Effect.logInfo("llm runtime selected", {
+          "llm.runtime": "claude-acp",
+          "llm.provider": input.model.providerID,
+          "llm.model": input.model.id,
+        })
+        return {
+          type: "native" as const,
+          stream: ClaudeACP.stream({
+            cwd: process.cwd(),
+            sessionID: input.sessionID,
+            modelID: input.model.id,
+            mcpServers: claudeMcpServers(cfg),
+            messages: input.messages,
+            abort: input.abort,
+            ruleset: Permission.merge(input.agent.permission, input.permission ?? []),
+            permission: {
+              ask: (request) => Effect.runPromise(perm.askWithReply(request)),
+              reply: (request) => Effect.runPromise(perm.reply(request)),
+            },
+          }),
+        }
+      }
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
@@ -385,6 +414,46 @@ const live: Layer.Layer<
 )
 
 export const hasToolCalls = LLMRequestPrep.hasToolCalls
+
+function claudeMcpServers(config: ConfigV1.Info): McpServer[] {
+  return Object.entries(config.mcp ?? {}).flatMap<McpServer>(([name, server]) => {
+    if (!isMcpConfigured(server) || server.enabled === false) return []
+
+    if (server.type === "local") {
+      const [command, ...args] = server.command
+      if (!command) return []
+      return [
+        {
+          name,
+          command,
+          args,
+          env: Object.entries(server.environment ?? {}).map(([name, value]) => ({ name, value })),
+        } satisfies McpServer,
+      ]
+    }
+
+    return [
+      {
+        type: remoteMcpType(server.url),
+        name,
+        url: server.url,
+        headers: Object.entries(server.headers ?? {}).map(([name, value]) => ({ name, value })),
+      } satisfies McpServer,
+    ]
+  })
+}
+
+function isMcpConfigured(server: NonNullable<ConfigV1.Info["mcp"]>[string]): server is ConfigMCPV1.Info {
+  return typeof server === "object" && server !== null && "type" in server
+}
+
+function remoteMcpType(url: string): "http" | "sse" {
+  try {
+    const parsed = new URL(url)
+    if (parsed.pathname.toLowerCase().endsWith("/sse")) return "sse"
+  } catch {}
+  return "http"
+}
 
 export const node = LayerNode.make({
   service: Service,

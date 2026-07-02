@@ -108,6 +108,11 @@ function TextBody(props: { title: string; description?: string; icon?: string })
   )
 }
 
+function recordValue(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
 export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
   const sdk = useSDK()
   const project = useProject()
@@ -120,15 +125,16 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
 
   const input = createMemo(() => {
+    const metadata = props.request.metadata ?? {}
     const tool = props.request.tool
-    if (!tool) return {}
+    if (!tool) return metadata
     const parts = sync.data.part[tool.messageID] ?? []
     for (const part of parts) {
       if (part.type === "tool" && part.callID === tool.callID && part.state.status !== "pending") {
-        return part.state.input ?? {}
+        return { ...metadata, ...recordValue(part.state.input) }
       }
     }
-    return {}
+    return metadata
   })
 
   const { theme } = useTheme()
