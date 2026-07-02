@@ -15,8 +15,24 @@ if (-not $InstallRoot) {
   $InstallRoot = Join-Path $env:LOCALAPPDATA "opencode-features"
 }
 
+function Resolve-BinDir {
+  if ($env:OPENCODE_FEATURES_BIN_DIR) {
+    return $env:OPENCODE_FEATURES_BIN_DIR
+  }
+
+  $userLocalBin = Join-Path $env:USERPROFILE ".local\bin"
+  $pathEntries = @($env:Path, [Environment]::GetEnvironmentVariable("Path", "User")) -join ";"
+  foreach ($entry in ($pathEntries -split ";" | Where-Object { $_ })) {
+    if ([System.IO.Path]::GetFullPath($entry).TrimEnd("\") -eq [System.IO.Path]::GetFullPath($userLocalBin).TrimEnd("\")) {
+      return $userLocalBin
+    }
+  }
+
+  return Join-Path $InstallRoot "bin"
+}
+
 $SourceDir = Join-Path $InstallRoot "source"
-$BinDir = Join-Path $InstallRoot "bin"
+$BinDir = Resolve-BinDir
 
 function Info($Message) {
   Write-Host "[opencode features] $Message"
