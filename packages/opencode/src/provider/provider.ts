@@ -1107,8 +1107,7 @@ function claudeACPProvider(): Info {
     env: [],
     options: {},
     models: {
-      [ClaudeACPModelID]: claudeACPModel(ClaudeACPModelID, "Claude"),
-      [ModelV2.ID.make("default")]: claudeACPModel("default", "Default (Opus 1M)", 1_000_000),
+      [ClaudeACPModelID]: claudeACPModel(ClaudeACPModelID, "Claude Code"),
       [ModelV2.ID.make("opus")]: claudeACPModel("opus", "Opus"),
       [ModelV2.ID.make("opus[1m]")]: claudeACPModel("opus[1m]", "Opus (1M context)", 1_000_000),
       [ModelV2.ID.make("sonnet")]: claudeACPModel("sonnet", "Sonnet"),

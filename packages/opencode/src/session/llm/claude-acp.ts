@@ -323,9 +323,11 @@ function abortError() {
 }
 
 function claudeEnv(modelID: string) {
+  const selected = claudeModelID(modelID)
+  if (!selected) return process.env
   return {
     ...process.env,
-    ANTHROPIC_MODEL: claudeModelID(modelID),
+    ANTHROPIC_MODEL: selected,
   }
 }
 
@@ -592,7 +594,7 @@ function currentPromptText(messages: ModelMessage[]) {
 }
 
 function claudeModelID(modelID: string) {
-  if (modelID === "claude") return "default"
+  if (modelID === "claude" || modelID === "default") return
   if (modelID === "fable") return "claude-fable-5"
   if (modelID === "fable[1m]") return "claude-fable-5[1m]"
   return modelID
