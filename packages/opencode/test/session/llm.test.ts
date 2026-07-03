@@ -6,9 +6,11 @@ import path from "path"
 import { tool, type ModelMessage } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
+import { EffectBridge } from "../../src/effect/bridge"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import z from "zod"
 import { LLM } from "../../src/session/llm"
+import { claudeACPPromptBridge } from "../../src/session/llm"
 import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -169,6 +171,55 @@ describe("session.llm.hasToolCalls", () => {
       },
     ] as ModelMessage[]
     expect(LLM.hasToolCalls(messages)).toBe(true)
+  })
+})
+
+describe("session.llm.claudeACPPromptBridge", () => {
+  test("preserves InstanceRef for async Claude ACP callbacks", async () => {
+    const ctx = {
+      directory: "C:/Users/matt/Projects/opencode",
+      worktree: "C:/Users/matt/Projects/opencode",
+      project: {} as never,
+    }
+
+    const callbacks = await Effect.runPromise(
+      Effect.gen(function* () {
+        const bridge = yield* EffectBridge.make()
+        return claudeACPPromptBridge({
+          bridge,
+          abort: new AbortController().signal,
+          permission: {
+            ask: () => Effect.void,
+            askWithReply: () =>
+              Effect.gen(function* () {
+                const current = yield* InstanceRef
+                if (!current) return yield* Effect.die("InstanceRef not provided")
+                return current.directory === ctx.directory ? "once" : "always"
+              }),
+            reply: () => Effect.void,
+            list: () => Effect.succeed([]),
+          },
+          question: {
+            ask: () =>
+              Effect.gen(function* () {
+                const current = yield* InstanceRef
+                if (!current) return yield* Effect.die("InstanceRef not provided")
+                return [[current.directory]]
+              }),
+            reply: () => Effect.void,
+            reject: () => Effect.void,
+            list: () => Effect.succeed([]),
+          },
+        })
+      }).pipe(Effect.provideService(InstanceRef, ctx)),
+    )
+
+    await Promise.resolve()
+
+    expect(await callbacks.permission.ask({} as PermissionV1.AskInput)).toBe("once")
+    expect(await callbacks.question.ask({ sessionID: SessionID.make("ses_test"), questions: [] })).toEqual([
+      [ctx.directory],
+    ])
   })
 })
 

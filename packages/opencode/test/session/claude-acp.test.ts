@@ -5,6 +5,7 @@ import {
   claudeACPElicitationFields,
   claudeACPPermissionRuleset,
   requestPermissionForActive,
+  resolveACPPath,
   claudeContextUsage,
   claudeUsage,
 } from "@/session/llm/claude-acp"
@@ -214,6 +215,39 @@ describe("Claude ACP permissions", () => {
 
     expect(result).toEqual({ outcome: { outcome: "selected", optionId: "deny" } })
   })
+
+  it("still asks for edit permission when Claude sends incomplete diff content", async () => {
+    const abort = new AbortController()
+    const replies: PermissionV1.AskInput[] = []
+
+    const result = await requestPermissionForActive(
+      {
+        sessionID: SessionID.make("ses_test"),
+        abort: abort.signal,
+        permission: {
+          ask: async (input) => {
+            replies.push(input)
+            return "once"
+          },
+          reply: async () => {},
+        },
+      },
+      editPermissionRequestWithIncompleteDiff(),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } })
+    expect(replies).toHaveLength(1)
+    expect(replies[0]?.permission).toBe("edit")
+    expect(replies[0]?.patterns).toEqual(["C:/Users/matt/new-file.txt"])
+  })
+})
+
+describe("Claude ACP filesystem", () => {
+  it("keeps absolute ACP file paths instead of scoping them under cwd", () => {
+    expect(resolveACPPath("C:/Users/matt/Projects/opencode", "C:/Users/matt/acp-permission-test.txt")).toBe(
+      "C:\\Users\\matt\\acp-permission-test.txt",
+    )
+  })
 })
 
 function permissionRequest() {
@@ -224,6 +258,30 @@ function permissionRequest() {
       kind: "execute",
       title: "printf hello",
       rawInput: { command: "printf hello" },
+    },
+    options: [
+      { optionId: "allow", kind: "allow_once", name: "Allow" },
+      { optionId: "deny", kind: "reject_once", name: "Deny" },
+    ],
+  } satisfies RequestPermissionRequest
+}
+
+function editPermissionRequestWithIncompleteDiff() {
+  const content = [
+    {
+      type: "diff",
+      path: "C:/Users/matt/new-file.txt",
+    } as NonNullable<RequestPermissionRequest["toolCall"]["content"]>[number],
+  ]
+
+  return {
+    sessionId: "claude_session",
+    toolCall: {
+      toolCallId: "call_edit",
+      kind: "edit",
+      title: "Create C:/Users/matt/new-file.txt",
+      rawInput: { filePath: "C:/Users/matt/new-file.txt" },
+      content,
     },
     options: [
       { optionId: "allow", kind: "allow_once", name: "Allow" },
