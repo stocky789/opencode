@@ -3,9 +3,8 @@ import { useRouteData } from "../../context/route"
 import { useSync } from "../../context/sync"
 import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
-import { assistantContextTokens } from "../../util/session"
+import { assistantContextTokens, latestAssistantContextMessage } from "../../util/session"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 
@@ -33,9 +32,7 @@ export function SubagentFooter() {
 
   const usage = createMemo(() => {
     const msg = messages()
-    const last = msg.findLast(
-      (item): item is AssistantMessage => item.role === "assistant" && assistantContextTokens(item) > 0,
-    )
+    const last = latestAssistantContextMessage(msg)
     if (!last) return
 
     const tokens = assistantContextTokens(last)

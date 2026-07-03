@@ -1,8 +1,7 @@
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createMemo } from "solid-js"
-import { assistantContextTokens } from "../../util/session"
+import { assistantContextTokens, latestAssistantContextMessage } from "../../util/session"
 
 const id = "internal:sidebar-context"
 
@@ -18,9 +17,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const cost = createMemo(() => session()?.cost ?? 0)
 
   const state = createMemo(() => {
-    const last = msg().findLast(
-      (item): item is AssistantMessage => item.role === "assistant" && assistantContextTokens(item) > 0,
-    )
+    const last = latestAssistantContextMessage(msg())
     if (!last) {
       return {
         tokens: 0,
