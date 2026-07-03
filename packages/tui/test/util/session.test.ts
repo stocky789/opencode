@@ -97,6 +97,33 @@ describe("util.session", () => {
     expect(latestAssistantContextMessage([completed, aborted] as Message[])?.id).toBe("aborted")
   })
 
+  test("keeps the largest completed usage instead of a later smaller completed turn", () => {
+    const larger = {
+      id: "larger",
+      role: "assistant",
+      tokens: {
+        total: 44_044,
+        input: 106,
+        output: 8_740,
+        reasoning: 0,
+        cache: { read: 451_001, write: 22_516 },
+      },
+    } as AssistantMessage
+    const smaller = {
+      id: "smaller",
+      role: "assistant",
+      tokens: {
+        total: 29_240,
+        input: 10,
+        output: 450,
+        reasoning: 0,
+        cache: { read: 21_158, write: 7_622 },
+      },
+    } as AssistantMessage
+
+    expect(latestAssistantContextMessage([larger, smaller] as Message[])?.id).toBe("larger")
+  })
+
   test("uses aborted usage when there is no completed assistant usage", () => {
     const aborted = {
       id: "aborted",

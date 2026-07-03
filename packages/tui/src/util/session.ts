@@ -18,12 +18,9 @@ export function assistantContextTokens(message: AssistantMessage) {
 export function latestAssistantContextMessage(messages: readonly Message[]) {
   const withUsage = (message: Message): message is AssistantMessage =>
     message.role === "assistant" && assistantContextTokens(message) > 0
-  const completed = messages.findLast(
-    (message): message is AssistantMessage => withUsage(message) && message.error?.name !== "MessageAbortedError",
-  )
-  const latest = messages.findLast(withUsage)
-  if (!completed) return latest
-  if (latest?.error?.name === "MessageAbortedError" && assistantContextTokens(latest) > assistantContextTokens(completed))
-    return latest
-  return completed
+  return messages.reduce<AssistantMessage | undefined>((max, message) => {
+    if (!withUsage(message)) return max
+    if (!max || assistantContextTokens(message) >= assistantContextTokens(max)) return message
+    return max
+  }, undefined)
 }

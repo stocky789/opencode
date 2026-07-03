@@ -196,7 +196,7 @@ function isAbort(error: { name?: string } | undefined): boolean {
 
 function updateUsage(data: SessionData, usage: { text: string; tokens: number } | undefined, aborted: boolean) {
   if (!usage) return undefined
-  if (!aborted || !data.usage || data.usage.aborted || usage.tokens > data.usage.tokens) {
+  if (!data.usage || usage.tokens >= data.usage.tokens) {
     data.usage = { ...usage, aborted }
     return usage.text
   }
