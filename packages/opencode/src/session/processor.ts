@@ -211,6 +211,23 @@ const layer = Layer.effect(
         delete ctx.reasoningMap[reasoningID]
       })
 
+      const recordProviderCompaction = Effect.fn("SessionProcessor.recordProviderCompaction")(function* (
+        metadata: Record<string, Record<string, unknown>> | undefined,
+      ) {
+        if (!providerCompacted(metadata)) return
+        const parts = yield* MessageV2.parts(ctx.assistantMessage.parentID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        if (parts.some((part) => part.type === "compaction")) return
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: ctx.assistantMessage.parentID,
+          sessionID: ctx.sessionID,
+          type: "compaction",
+          auto: true,
+        })
+      })
+
       const ensureToolCall = Effect.fn("SessionProcessor.ensureToolCall")(function* (input: {
         id: string
         name: string
@@ -452,6 +469,7 @@ const layer = Layer.effect(
               cost: usage.cost,
             })
             yield* session.updateMessage(ctx.assistantMessage)
+            yield* recordProviderCompaction(value.providerMetadata)
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
@@ -712,5 +730,9 @@ export const node = LayerNode.make({
     Database.node,
   ],
 })
+
+function providerCompacted(metadata: Record<string, Record<string, unknown>> | undefined) {
+  return metadata?.anthropic?.acpCompacted === true
+}
 
 export * as SessionProcessor from "./processor"

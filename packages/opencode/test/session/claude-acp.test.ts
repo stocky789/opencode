@@ -1,5 +1,14 @@
 import { describe, expect, it } from "bun:test"
-import { claudeUsage } from "@/session/llm/claude-acp"
+import { claudeACPCompactionStatus, claudeUsage } from "@/session/llm/claude-acp"
+
+describe("Claude ACP compaction status", () => {
+  it("recognizes Claude ACP compaction control messages", () => {
+    expect(claudeACPCompactionStatus("Compacting...")).toBe("started")
+    expect(claudeACPCompactionStatus("\n\nCompacting completed.")).toBe("completed")
+    expect(claudeACPCompactionStatus("Compacting failed: too much context")).toBeUndefined()
+    expect(claudeACPCompactionStatus("Compacting the answer now.")).toBeUndefined()
+  })
+})
 
 describe("Claude ACP usage", () => {
   it("maps ACP usage into inclusive OpenCode token usage", () => {
