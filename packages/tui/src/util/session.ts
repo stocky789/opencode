@@ -21,5 +21,9 @@ export function latestAssistantContextMessage(messages: readonly Message[]) {
   const completed = messages.findLast(
     (message): message is AssistantMessage => withUsage(message) && message.error?.name !== "MessageAbortedError",
   )
-  return completed ?? messages.findLast(withUsage)
+  const latest = messages.findLast(withUsage)
+  if (!completed) return latest
+  if (latest?.error?.name === "MessageAbortedError" && assistantContextTokens(latest) > assistantContextTokens(completed))
+    return latest
+  return completed
 }
