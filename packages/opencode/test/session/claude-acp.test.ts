@@ -21,6 +21,31 @@ describe("Claude ACP usage", () => {
     expect(usage?.totalTokens).toBe(165)
   })
 
+  it("uses ACP context usage as the reported total when available", () => {
+    const usage = claudeUsage(
+      {
+        inputTokens: 100,
+        outputTokens: 25,
+        cachedReadTokens: 30,
+        cachedWriteTokens: 10,
+        totalTokens: 165,
+      },
+      { used: 32_000, size: 1_000_000 },
+    )
+
+    expect(usage?.inputTokens).toBe(140)
+    expect(usage?.outputTokens).toBe(25)
+    expect(usage?.totalTokens).toBe(32_000)
+    expect(usage?.providerMetadata?.anthropic).toEqual({
+      inputTokens: 100,
+      outputTokens: 25,
+      cachedReadTokens: 30,
+      cachedWriteTokens: 10,
+      totalTokens: 165,
+      context: { used: 32_000, size: 1_000_000 },
+    })
+  })
+
   it("omits usage when Claude ACP does not report it", () => {
     expect(claudeUsage(undefined)).toBeUndefined()
     expect(claudeUsage(null)).toBeUndefined()
