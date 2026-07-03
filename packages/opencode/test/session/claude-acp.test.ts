@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { claudeACPCompactionStatus, claudeUsage } from "@/session/llm/claude-acp"
+import { claudeACPCompactionStatus, claudeContextUsage, claudeUsage } from "@/session/llm/claude-acp"
 
 describe("Claude ACP compaction status", () => {
   it("recognizes Claude ACP compaction control messages", () => {
@@ -58,5 +58,16 @@ describe("Claude ACP usage", () => {
   it("omits usage when Claude ACP does not report it", () => {
     expect(claudeUsage(undefined)).toBeUndefined()
     expect(claudeUsage(null)).toBeUndefined()
+  })
+
+  it("creates context-only usage from ACP usage updates", () => {
+    const usage = claudeContextUsage({ used: 48_000, size: 200_000 })
+
+    expect(usage?.inputTokens).toBe(0)
+    expect(usage?.outputTokens).toBe(0)
+    expect(usage?.totalTokens).toBe(48_000)
+    expect(usage?.providerMetadata?.anthropic).toEqual({
+      context: { used: 48_000, size: 200_000 },
+    })
   })
 })
