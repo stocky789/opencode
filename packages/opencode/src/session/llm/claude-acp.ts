@@ -7,6 +7,10 @@ import type {
   Client,
   CreateTerminalRequest,
   CreateTerminalResponse,
+  CreateElicitationRequest,
+  CreateElicitationResponse,
+  ElicitationContentValue,
+  ElicitationPropertySchema,
   KillTerminalRequest,
   KillTerminalResponse,
   McpServer,
@@ -25,6 +29,7 @@ import type {
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk"
 import { LLMEvent, Usage, type FinishReason, type LLMEvent as LLMEventType } from "@opencode-ai/llm"
+import { Question } from "@/question"
 import type { ModelMessage } from "ai"
 import { createTwoFilesPatch } from "diff"
 import * as Stream from "effect/Stream"
@@ -32,6 +37,10 @@ import * as Stream from "effect/Stream"
 type PermissionBridge = {
   readonly ask: (input: PermissionV1.AskInput) => Promise<PermissionV1.Reply>
   readonly reply: (input: PermissionV1.ReplyInput) => Promise<void>
+}
+
+type QuestionBridge = {
+  readonly ask: (input: Parameters<Question.Interface["ask"]>[0]) => Promise<ReadonlyArray<Question.Answer>>
 }
 
 type StreamInput = {
@@ -44,6 +53,7 @@ type StreamInput = {
   readonly abort: AbortSignal
   readonly ruleset: PermissionV1.Ruleset
   readonly permission: PermissionBridge
+  readonly question: QuestionBridge
 }
 
 type Terminal = {
@@ -77,6 +87,12 @@ type ACPProviderMetadata = {
   readonly anthropic: Record<string, unknown>
 }
 
+type ElicitationField = {
+  readonly key: string
+  readonly question: Question.Info
+  readonly value: (answers: ReadonlyArray<string>) => ElicitationContentValue | undefined
+}
+
 type Connection = {
   readonly key: string
   readonly cwd: string
@@ -95,6 +111,7 @@ type Connection = {
     readonly abort: AbortSignal
     readonly ruleset: PermissionV1.Ruleset
     readonly permission: PermissionBridge
+    readonly question: QuestionBridge
     contextUsage?: ACPContextUsage
     providerCompacted?: boolean
   }
@@ -149,6 +166,7 @@ async function* run(input: StreamInput) {
           abort: input.abort,
           ruleset: input.ruleset,
           permission: input.permission,
+          question: input.question,
         }
         try {
           const response = await activeConnection.client.prompt({
@@ -284,6 +302,7 @@ async function createConnection(input: StreamInput, key: string): Promise<Connec
       clientInfo: { name: "OpenCode", version: "0.0.0" },
       clientCapabilities: {
         auth: { terminal: true },
+        elicitation: { form: {} },
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
       },
@@ -378,6 +397,7 @@ function makeClient(connection: Connection): Client {
   return {
     sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection, params),
     requestPermission: (params) => requestPermission(connection, params),
+    unstable_createElicitation: (params) => createElicitation(connection, params),
     readTextFile: (params) => readTextFile(connection.active?.cwd ?? connection.cwd, params),
     writeTextFile: (params) => writeTextFile(connection.active?.cwd ?? connection.cwd, params),
     createTerminal: (params) => createTerminal(connection, params),
@@ -529,6 +549,137 @@ function rejectPermission(params: RequestPermissionRequest): RequestPermissionRe
 
 function cancelledPermission(): RequestPermissionResponse {
   return { outcome: { outcome: "cancelled" } }
+}
+
+async function createElicitation(
+  connection: Connection,
+  params: CreateElicitationRequest,
+): Promise<CreateElicitationResponse> {
+  const active = connection.active
+  if (!active || active.abort.aborted) return { action: "cancel" }
+  if (params.mode !== "form" || !("sessionId" in params)) return { action: "decline" }
+
+  const fields = claudeACPElicitationFields(params)
+  if (fields.length === 0) return { action: "accept", content: {} }
+
+  try {
+    const answers = await active.question.ask({
+      sessionID: active.sessionID,
+      questions: fields.map((field) => field.question),
+    })
+    return { action: "accept", content: claudeACPElicitationContent(fields, answers) }
+  } catch {
+    if (active.abort.aborted) return { action: "cancel" }
+    return { action: "decline" }
+  }
+}
+
+export function claudeACPElicitationFields(params: CreateElicitationRequest): ElicitationField[] {
+  if (params.mode !== "form") return []
+  return Object.entries(params.requestedSchema.properties ?? {}).map(([key, property]) =>
+    elicitationField(key, property, params),
+  )
+}
+
+export function claudeACPElicitationContent(
+  fields: ReadonlyArray<ElicitationField>,
+  answers: ReadonlyArray<Question.Answer>,
+) {
+  return Object.fromEntries(
+    fields.flatMap((field, index) => {
+      const value = field.value(answers[index] ?? [])
+      if (value === undefined) return []
+      return [[field.key, value]]
+    }),
+  )
+}
+
+function elicitationField(key: string, property: ElicitationPropertySchema, params: CreateElicitationRequest) {
+  const title = property.title ?? key
+  const description = property.description ?? params.message
+  const base = {
+    header: shortHeader(title),
+    question: title,
+  }
+
+  if (property.type === "string") {
+    const choices = property.oneOf?.map((item) => ({ label: item.title, description: item.const })) ?? property.enum
+    const options = choices?.map((item) =>
+      typeof item === "string" ? { label: item, description } : { label: item.label, description: item.description },
+    )
+    const values = choices?.map(
+      (item): readonly [string, string] =>
+        typeof item === "string" ? [item, item] : [item.label, item.description],
+    )
+    return {
+      key,
+      question: { ...base, options: options ?? [], custom: !options?.length },
+      value: (answers: ReadonlyArray<string>) => valueFromLabels(values, answers, property.default),
+    } satisfies ElicitationField
+  }
+
+  if (property.type === "array") {
+    const raw = "anyOf" in property.items ? property.items.anyOf : property.items.enum
+    const values = raw.map(
+      (item): readonly [string, string] => (typeof item === "string" ? [item, item] : [item.title, item.const]),
+    )
+    return {
+      key,
+      question: {
+        ...base,
+        options: values.map(([label, value]) => ({ label, description: value })),
+        custom: false,
+        multiple: true,
+      },
+      value: (answers: ReadonlyArray<string>) => valueFromLabels(values, answers, property.default ?? []),
+    } satisfies ElicitationField
+  }
+
+  if (property.type === "boolean") {
+    return {
+      key,
+      question: {
+        ...base,
+        options: [
+          { label: "Yes", description },
+          { label: "No", description },
+        ],
+        custom: false,
+      },
+      value: (answers: ReadonlyArray<string>) => {
+        if (answers[0] === "Yes") return true
+        if (answers[0] === "No") return false
+        return property.default ?? undefined
+      },
+    } satisfies ElicitationField
+  }
+
+  return {
+    key,
+    question: { ...base, options: [], custom: true },
+    value: (answers: ReadonlyArray<string>) => {
+      const value = answers[0]
+      if (value === undefined || value.trim() === "") return property.default ?? undefined
+      const parsed = property.type === "integer" ? Number.parseInt(value, 10) : Number(value)
+      if (Number.isNaN(parsed)) return property.default ?? undefined
+      return parsed
+    },
+  } satisfies ElicitationField
+}
+
+function valueFromLabels(
+  values: ReadonlyArray<readonly [string, string]> | undefined,
+  answers: ReadonlyArray<string>,
+  fallback: string | ReadonlyArray<string> | null | undefined,
+) {
+  if (!values) return answers[0] ?? fallback ?? undefined
+  const selected = answers.flatMap((answer) => values.find(([label]) => label === answer)?.[1] ?? [])
+  if (Array.isArray(fallback)) return selected.length ? selected : fallback
+  return selected[0] ?? fallback ?? undefined
+}
+
+function shortHeader(value: string) {
+  return value.length <= 30 ? value : value.slice(0, 30)
 }
 
 async function readTextFile(cwd: string, params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
