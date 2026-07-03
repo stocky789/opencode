@@ -519,9 +519,19 @@ function permissionMetadata(params: RequestPermissionRequest): Record<string, un
 
   const diff = params.toolCall.content?.find((item) => item.type === "diff")
   if (diff) {
-    metadata.filepath = diff.path
-    metadata.filePath = diff.path
-    metadata.diff = createTwoFilesPatch(diff.path, diff.path, diff.oldText ?? "", diff.newText)
+    const diffPath = stringValue(diff.path)
+    if (diffPath) {
+      metadata.filepath = diffPath
+      metadata.filePath = diffPath
+    }
+    if (diffPath && typeof diff.newText === "string") {
+      metadata.diff = createTwoFilesPatch(
+        diffPath,
+        diffPath,
+        typeof diff.oldText === "string" ? diff.oldText : "",
+        diff.newText,
+      )
+    }
   }
 
   if (params.toolCall.kind === "execute") metadata.command ??= params.toolCall.title ?? params.toolCall.toolCallId
@@ -706,14 +716,14 @@ function shortHeader(value: string) {
 }
 
 async function readTextFile(cwd: string, params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
-  const content = await Bun.file(scoped(cwd, params.path)).text()
+  const content = await Bun.file(resolveACPPath(cwd, params.path)).text()
   if (!params.line && !params.limit) return { content }
   const start = (params.line ?? 1) - 1
   return { content: content.split(/\r?\n/).slice(start, params.limit ? start + params.limit : undefined).join("\n") }
 }
 
 async function writeTextFile(cwd: string, params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
-  const target = scoped(cwd, params.path)
+  const target = resolveACPPath(cwd, params.path)
   await mkdir(path.dirname(target), { recursive: true })
   await Bun.write(target, params.content)
   return {}
@@ -727,7 +737,7 @@ async function createTerminal(
   const output: string[] = []
   const subprocess = Bun.spawn({
     cmd: [params.command, ...(params.args ?? [])],
-    cwd: params.cwd ? scoped(input.cwd, params.cwd) : input.cwd,
+    cwd: params.cwd ? resolveACPPath(input.cwd, params.cwd) : input.cwd,
     env: params.env ? { ...process.env, ...Object.fromEntries(params.env.map((entry) => [entry.name, entry.value])) } : process.env,
     stdin: "ignore",
     stdout: "pipe",
@@ -923,11 +933,9 @@ function contentText(content: ModelMessage["content"]): string {
     .join("\n")
 }
 
-function scoped(cwd: string, value: string) {
-  const target = path.resolve(cwd, value)
-  const root = path.resolve(cwd)
-  if (target === root || target.startsWith(`${root}${path.sep}`)) return target
-  throw RequestError.invalidParams({ path: value }, "Path is outside the session workspace")
+export function resolveACPPath(cwd: string, value: string) {
+  if (path.isAbsolute(value)) return path.resolve(value)
+  return path.resolve(cwd, value)
 }
 
 function writable(sink: Bun.FileSink): WritableStream<Uint8Array> {

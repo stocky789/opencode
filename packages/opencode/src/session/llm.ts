@@ -64,6 +64,24 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/LL
 
 export const use = serviceUse(Service)
 
+export function claudeACPPromptBridge(input: {
+  readonly bridge: EffectBridge.Shape
+  readonly abort: AbortSignal
+  readonly permission: Permission.Interface
+  readonly question: Question.Interface
+}) {
+  return {
+    permission: {
+      ask: (request: PermissionV1.AskInput) => input.bridge.promise(input.permission.askWithReply(request)),
+      reply: (request: PermissionV1.ReplyInput) => input.bridge.promise(input.permission.reply(request)),
+    },
+    question: {
+      ask: (request: Parameters<Question.Interface["ask"]>[0]) =>
+        input.bridge.promise(input.question.ask(request), { signal: input.abort }),
+    },
+  }
+}
+
 const live: Layer.Layer<
   Service,
   never,
@@ -101,6 +119,8 @@ const live: Layer.Layer<
 
       if (input.model.providerID === ClaudeACPProviderID) {
         const cfg = yield* config.get()
+        const bridge = yield* EffectBridge.make()
+        const prompts = claudeACPPromptBridge({ bridge, abort: input.abort, permission: perm, question })
         yield* Effect.logInfo("llm runtime selected", {
           "llm.runtime": "claude-acp",
           "llm.provider": input.model.providerID,
@@ -117,13 +137,8 @@ const live: Layer.Layer<
             messages: input.messages,
             abort: input.abort,
             ruleset: Permission.merge(input.agent.permission, input.permission ?? []),
-            permission: {
-              ask: (request) => Effect.runPromise(perm.askWithReply(request)),
-              reply: (request) => Effect.runPromise(perm.reply(request)),
-            },
-            question: {
-              ask: (request) => Effect.runPromise(question.ask(request), { signal: input.abort }),
-            },
+            permission: prompts.permission,
+            question: prompts.question,
           }),
         }
       }
