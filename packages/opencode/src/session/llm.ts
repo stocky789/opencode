@@ -20,6 +20,7 @@ import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
+import { Question } from "@/question"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Wildcard } from "@/util/wildcard"
@@ -71,6 +72,7 @@ const live: Layer.Layer<
   | Provider.Service
   | Plugin.Service
   | Permission.Service
+  | Question.Service
   | EventV2Bridge.Service
   | LLMClientService
   | RuntimeFlags.Service
@@ -82,6 +84,7 @@ const live: Layer.Layer<
     const provider = yield* Provider.Service
     const plugin = yield* Plugin.Service
     const perm = yield* Permission.Service
+    const question = yield* Question.Service
     const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
@@ -116,6 +119,9 @@ const live: Layer.Layer<
             permission: {
               ask: (request) => Effect.runPromise(perm.askWithReply(request)),
               reply: (request) => Effect.runPromise(perm.reply(request)),
+            },
+            question: {
+              ask: (request) => Effect.runPromise(question.ask(request), { signal: input.abort }),
             },
           }),
         }
@@ -464,6 +470,7 @@ export const node = LayerNode.make({
     Provider.node,
     Plugin.node,
     Permission.node,
+    Question.node,
     EventV2Bridge.node,
     llmClient,
     RuntimeFlags.node,

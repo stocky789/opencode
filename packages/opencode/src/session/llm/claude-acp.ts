@@ -5,8 +5,13 @@ import { ClientSideConnection, PROTOCOL_VERSION, RequestError, ndJsonStream } fr
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import type {
   Client,
+  ClientCapabilities,
+  CreateElicitationRequest,
+  CreateElicitationResponse,
   CreateTerminalRequest,
   CreateTerminalResponse,
+  ElicitationContentValue,
+  ElicitationPropertySchema,
   KillTerminalRequest,
   KillTerminalResponse,
   McpServer,
@@ -34,6 +39,23 @@ type PermissionBridge = {
   readonly reply: (input: PermissionV1.ReplyInput) => Promise<void>
 }
 
+type QuestionInfo = {
+  readonly question: string
+  readonly header: string
+  readonly options: readonly { readonly label: string; readonly description: string }[]
+  readonly multiple?: boolean
+  readonly custom?: boolean
+}
+
+type QuestionAnswer = readonly string[]
+
+type QuestionBridge = {
+  readonly ask: (input: {
+    readonly sessionID: PermissionV1.AskInput["sessionID"]
+    readonly questions: readonly QuestionInfo[]
+  }) => Promise<readonly QuestionAnswer[]>
+}
+
 type StreamInput = {
   readonly cwd: string
   readonly sessionID: PermissionV1.AskInput["sessionID"]
@@ -43,6 +65,7 @@ type StreamInput = {
   readonly abort: AbortSignal
   readonly ruleset: PermissionV1.Ruleset
   readonly permission: PermissionBridge
+  readonly question: QuestionBridge
 }
 
 type Terminal = {
@@ -58,6 +81,19 @@ type QueueItem =
   | { readonly type: "done" }
   | { readonly type: "error"; readonly error: unknown }
 
+type ActiveBridge = {
+  readonly sessionID: PermissionV1.AskInput["sessionID"]
+  readonly abort: AbortSignal
+  readonly ruleset: PermissionV1.Ruleset
+  readonly permission: PermissionBridge
+  readonly question: QuestionBridge
+}
+
+type ActiveConnection = ActiveBridge & {
+  readonly cwd: string
+  readonly queue: ReturnType<typeof makeQueue>
+}
+
 type Connection = {
   readonly key: string
   readonly cwd: string
@@ -69,14 +105,7 @@ type Connection = {
   lock: Promise<void>
   used: boolean
   disposed: boolean
-  active?: {
-    readonly cwd: string
-    readonly queue: ReturnType<typeof makeQueue>
-    readonly sessionID: PermissionV1.AskInput["sessionID"]
-    readonly abort: AbortSignal
-    readonly ruleset: PermissionV1.Ruleset
-    readonly permission: PermissionBridge
-  }
+  active?: ActiveConnection
   disposeTimer?: ReturnType<typeof setTimeout>
 }
 
@@ -129,6 +158,7 @@ async function* run(input: StreamInput) {
           abort: input.abort,
           ruleset: input.ruleset,
           permission: input.permission,
+          question: input.question,
         }
         try {
           await activeConnection.client.prompt({
@@ -239,11 +269,7 @@ async function createConnection(input: StreamInput, key: string): Promise<Connec
     await connection.client.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientInfo: { name: "OpenCode", version: "0.0.0" },
-      clientCapabilities: {
-        auth: { terminal: true },
-        fs: { readTextFile: true, writeTextFile: true },
-        terminal: true,
-      },
+      clientCapabilities: clientCapabilities(),
     })
     if (input.abort.aborted) throw abortError()
     const session = await connection.client.newSession({ cwd: input.cwd, mcpServers: [...input.mcpServers] })
@@ -329,6 +355,7 @@ function makeClient(connection: Connection): Client {
   return {
     sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection.active?.queue, params),
     requestPermission: (params) => requestPermission(connection, params),
+    unstable_createElicitation: (params) => createElicitation(connection, params),
     readTextFile: (params) => readTextFile(connection.active?.cwd ?? connection.cwd, params),
     writeTextFile: (params) => writeTextFile(connection.active?.cwd ?? connection.cwd, params),
     createTerminal: (params) => createTerminal(connection, params),
@@ -336,6 +363,15 @@ function makeClient(connection: Connection): Client {
     waitForTerminalExit: (params) => waitForTerminalExit(connection.terminals, params),
     killTerminal: (params) => killTerminal(connection.terminals, params),
     releaseTerminal: (params) => releaseTerminal(connection.terminals, params),
+  }
+}
+
+function clientCapabilities(): ClientCapabilities {
+  return {
+    auth: { terminal: true },
+    elicitation: { form: {} },
+    fs: { readTextFile: true, writeTextFile: true },
+    terminal: true,
   }
 }
 
@@ -354,7 +390,13 @@ async function requestPermission(
   connection: Connection,
   params: RequestPermissionRequest,
 ): Promise<RequestPermissionResponse> {
-  const active = connection.active
+  return requestPermissionForActive(connection.active, params)
+}
+
+async function requestPermissionForActive(
+  active: ActiveBridge | undefined,
+  params: RequestPermissionRequest,
+): Promise<RequestPermissionResponse> {
   if (!active || active.abort.aborted) return cancelledPermission()
 
   const requestID = PermissionV1.ID.ascending()
@@ -374,7 +416,7 @@ async function requestPermission(
       patterns,
       always: permissionAlways(permission, patterns),
       metadata,
-      ruleset: active.ruleset,
+      ruleset: permissionPromptRuleset(permission, patterns, active.ruleset),
     })
     return allowPermission(params, reply)
   } catch {
@@ -451,6 +493,13 @@ function permissionAlways(permission: string, patterns: string[]) {
   return ["*"]
 }
 
+function permissionPromptRuleset(permission: string, patterns: string[], ruleset: PermissionV1.Ruleset) {
+  return [
+    ...patterns.map((pattern) => ({ permission, pattern, action: "ask" as const })),
+    ...ruleset.filter((rule) => rule.action === "deny"),
+  ] satisfies PermissionV1.Ruleset
+}
+
 function allowPermission(params: RequestPermissionRequest, reply: PermissionV1.Reply): RequestPermissionResponse {
   const preferred = reply === "always" ? "allow_always" : "allow_once"
   const option =
@@ -468,6 +517,144 @@ function rejectPermission(params: RequestPermissionRequest): RequestPermissionRe
 
 function cancelledPermission(): RequestPermissionResponse {
   return { outcome: { outcome: "cancelled" } }
+}
+
+async function createElicitation(
+  connection: Connection,
+  params: CreateElicitationRequest,
+): Promise<CreateElicitationResponse> {
+  return createElicitationForActive(connection.active, params)
+}
+
+async function createElicitationForActive(
+  active: ActiveBridge | undefined,
+  params: CreateElicitationRequest,
+): Promise<CreateElicitationResponse> {
+  if (!active || active.abort.aborted) return { action: "cancel" }
+  if (params.mode !== "form") return { action: "decline" }
+
+  const request = questionRequestFromElicitation(params)
+  if (request.questions.length === 0) return { action: "decline" }
+
+  try {
+    const answers = await active.question.ask({
+      sessionID: active.sessionID,
+      questions: request.questions,
+    })
+    if (active.abort.aborted) return { action: "cancel" }
+    return { action: "accept", content: elicitationContent(request.fields, answers) }
+  } catch {
+    if (active.abort.aborted) return { action: "cancel" }
+    return { action: "decline" }
+  }
+}
+
+type ElicitationQuestionField = {
+  readonly key: string
+  readonly customKey?: string
+  readonly options: readonly string[]
+  readonly type: ElicitationPropertySchema["type"]
+}
+
+function questionRequestFromElicitation(params: CreateElicitationRequest) {
+  if (params.mode !== "form") return { questions: [], fields: [] }
+
+  const properties = params.requestedSchema.properties ?? {}
+  const entries = Object.entries(properties).flatMap(([key, property]) => {
+    if (isCustomProperty(key, properties)) return []
+
+    const options = propertyOptions(property)
+    const customKey = `${key}_custom`
+    const hasCustom = Object.hasOwn(properties, customKey)
+    const question = {
+      question: property.description ?? params.message,
+      header: property.title ?? key,
+      options: options.length > 0 ? options : [{ label: "Custom", description: "Type a response" }],
+      ...(property.type === "array" ? { multiple: true } : {}),
+      ...(hasCustom || options.length === 0 ? { custom: true } : {}),
+    } satisfies QuestionInfo
+    return [
+      {
+        question,
+        field: {
+          key,
+          customKey: hasCustom ? customKey : undefined,
+          options: options.map((item) => item.label),
+          type: property.type,
+        } satisfies ElicitationQuestionField,
+      },
+    ]
+  })
+
+  return {
+    questions: entries.map((entry) => entry.question),
+    fields: entries.map((entry) => entry.field),
+  }
+}
+
+function isCustomProperty(key: string, properties: Record<string, ElicitationPropertySchema>) {
+  if (!key.endsWith("_custom")) return false
+  return Object.hasOwn(properties, key.slice(0, -"_custom".length))
+}
+
+function propertyOptions(property: ElicitationPropertySchema): QuestionInfo["options"] {
+  if (property.type === "string") {
+    if (property.oneOf?.length) return property.oneOf.map((item) => ({ label: item.const, description: item.title }))
+    if (property.enum?.length) return property.enum.map((item) => ({ label: item, description: item }))
+    return []
+  }
+
+  if (property.type === "array") {
+    if ("anyOf" in property.items) {
+      return property.items.anyOf.map((item) => ({ label: item.const, description: item.title }))
+    }
+    return property.items.enum.map((item) => ({ label: item, description: item }))
+  }
+
+  if (property.type === "boolean") {
+    return [
+      { label: "Yes", description: "Yes" },
+      { label: "No", description: "No" },
+    ]
+  }
+
+  return []
+}
+
+function elicitationContent(
+  fields: readonly ElicitationQuestionField[],
+  answers: readonly QuestionAnswer[],
+): Record<string, ElicitationContentValue> {
+  return Object.fromEntries(
+    fields.flatMap((field, index) => {
+      const answer = answers[index] ?? []
+      const value = elicitationContentValue(field, answer)
+      if (!value) return []
+      return [[value.key, value.value]]
+    }),
+  )
+}
+
+function elicitationContentValue(
+  field: ElicitationQuestionField,
+  answer: readonly string[],
+): { readonly key: string; readonly value: ElicitationContentValue } | undefined {
+  if (field.type === "array") {
+    if (answer.length === 0) return undefined
+    return { key: field.key, value: [...answer] }
+  }
+
+  const value = answer[0]
+  if (!value) return undefined
+  if (field.customKey && !field.options.includes(value)) return { key: field.customKey, value }
+  if (field.type === "boolean") return { key: field.key, value: value === "Yes" }
+
+  if (field.type === "number" || field.type === "integer") {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return { key: field.key, value: parsed }
+  }
+
+  return { key: field.key, value }
 }
 
 async function readTextFile(cwd: string, params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
@@ -646,6 +833,12 @@ function writable(sink: Bun.FileSink): WritableStream<Uint8Array> {
       sink.end()
     },
   })
+}
+
+export const ClaudeACPTest = {
+  clientCapabilities,
+  createElicitationForActive,
+  requestPermissionForActive,
 }
 
 function makeQueue() {
