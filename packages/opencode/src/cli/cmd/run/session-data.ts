@@ -89,6 +89,7 @@ export type SessionData = {
   echo: Map<string, Set<string>>
   usage: {
     text: string
+    tokens: number
     aborted: boolean
   } | undefined
 }
@@ -141,7 +142,7 @@ function formatUsage(
   tokens: Tokens | undefined,
   limit: number | undefined,
   cost: number | undefined,
-): string | undefined {
+): { text: string; tokens: number } | undefined {
   const total =
     tokens?.total ??
     (tokens?.input ?? 0) +
@@ -152,7 +153,7 @@ function formatUsage(
 
   if (total <= 0) {
     if (typeof cost === "number" && cost > 0) {
-      return money.format(cost)
+      return { text: money.format(cost), tokens: 0 }
     }
     return undefined
   }
@@ -161,10 +162,10 @@ function formatUsage(
     limit && limit > 0 ? `${Locale.number(total)} (${Math.round((total / limit) * 100)}%)` : Locale.number(total)
 
   if (typeof cost === "number" && cost > 0) {
-    return `${text} · ${money.format(cost)}`
+    return { text: `${text} · ${money.format(cost)}`, tokens: total }
   }
 
-  return text
+  return { text, tokens: total }
 }
 
 export function formatError(error: {
@@ -193,11 +194,11 @@ function isAbort(error: { name?: string } | undefined): boolean {
   return error?.name === "MessageAbortedError"
 }
 
-function updateUsage(data: SessionData, usage: string | undefined, aborted: boolean) {
+function updateUsage(data: SessionData, usage: { text: string; tokens: number } | undefined, aborted: boolean) {
   if (!usage) return undefined
-  if (!aborted || !data.usage || data.usage.aborted) {
-    data.usage = { text: usage, aborted }
-    return usage
+  if (!aborted || !data.usage || data.usage.aborted || usage.tokens > data.usage.tokens) {
+    data.usage = { ...usage, aborted }
+    return usage.text
   }
   return undefined
 }

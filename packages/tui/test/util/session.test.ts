@@ -70,6 +70,33 @@ describe("util.session", () => {
     expect(latestAssistantContextMessage([completed, aborted] as Message[])?.id).toBe("completed")
   })
 
+  test("uses later aborted usage when it exceeds previous completed usage", () => {
+    const completed = {
+      id: "completed",
+      role: "assistant",
+      tokens: {
+        total: 40_578,
+        input: 38,
+        output: 6_476,
+        reasoning: 0,
+        cache: { read: 109_805, write: 15_824 },
+      },
+    } as AssistantMessage
+    const aborted = {
+      id: "aborted",
+      role: "assistant",
+      error: { name: "MessageAbortedError" },
+      tokens: {
+        input: 55_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 0, write: 0 },
+      },
+    } as AssistantMessage
+
+    expect(latestAssistantContextMessage([completed, aborted] as Message[])?.id).toBe("aborted")
+  })
+
   test("uses aborted usage when there is no completed assistant usage", () => {
     const aborted = {
       id: "aborted",

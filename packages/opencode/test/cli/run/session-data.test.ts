@@ -333,6 +333,38 @@ describe("run session data", () => {
     expect(aborted.data.usage?.text).toBe("40.6K")
   })
 
+  test("allows aborted footer usage to increase previous completed usage", () => {
+    let data = createSessionData()
+    data = reduce(
+      data,
+      assistant("msg-1", {
+        tokens: {
+          total: 40_578,
+          input: 38,
+          output: 6_476,
+          reasoning: 0,
+          cache: { read: 109_805, write: 15_824 },
+        },
+      }),
+    ).data
+
+    const aborted = reduce(
+      data,
+      assistant("msg-2", {
+        error: { name: "MessageAbortedError" },
+        tokens: {
+          input: 55_000,
+          output: 2_000,
+          reasoning: 500,
+          cache: { read: 0, write: 0 },
+        },
+      }),
+    )
+
+    expect(aborted.footer?.patch?.usage).toBe("57.5K")
+    expect(aborted.data.usage?.text).toBe("57.5K")
+  })
+
   test("shows aborted footer usage when no completed usage exists", () => {
     const out = reduce(
       createSessionData(),
