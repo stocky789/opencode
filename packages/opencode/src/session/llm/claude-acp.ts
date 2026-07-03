@@ -127,7 +127,6 @@ async function* run(input: StreamInput) {
   const onAbort = () => {
     if (!connection) return
     void connection.client.cancel({ sessionId: connection.sessionID }).catch(() => undefined)
-    disposeConnection(connection)
   }
   input.abort.addEventListener("abort", onAbort, { once: true })
 
@@ -193,13 +192,15 @@ async function* run(input: StreamInput) {
       if (connection) {
         const usage = claudeContextUsage(connection.active?.contextUsage)
         const providerMetadata = claudeProviderMetadata(connection.active?.providerCompacted)
+        const aborted = input.abort.aborted
         connection.active = undefined
         cleanupTerminals(connection)
-        disposeConnection(connection)
-        if (input.abort.aborted) {
+        if (aborted) {
+          scheduleDispose(connection)
           finish(queue, "error", usage, providerMetadata)
           return
         }
+        disposeConnection(connection)
       }
       if (input.abort.aborted) {
         finish(queue, "error")
