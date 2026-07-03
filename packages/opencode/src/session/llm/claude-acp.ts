@@ -24,7 +24,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk"
-import { LLMEvent, type LLMEvent as LLMEventType } from "@opencode-ai/llm"
+import { LLMEvent, Usage, type FinishReason, type LLMEvent as LLMEventType } from "@opencode-ai/llm"
 import type { ModelMessage } from "ai"
 import { createTwoFilesPatch } from "diff"
 import * as Stream from "effect/Stream"
@@ -57,6 +57,15 @@ type QueueItem =
   | { readonly type: "event"; readonly event: LLMEventType }
   | { readonly type: "done" }
   | { readonly type: "error"; readonly error: unknown }
+
+type ACPUsage = {
+  readonly cachedReadTokens?: number | null
+  readonly cachedWriteTokens?: number | null
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly thoughtTokens?: number | null
+  readonly totalTokens: number
+}
 
 type Connection = {
   readonly key: string
@@ -131,7 +140,7 @@ async function* run(input: StreamInput) {
           permission: input.permission,
         }
         try {
-          await activeConnection.client.prompt({
+          const response = await activeConnection.client.prompt({
             sessionId: activeConnection.sessionID,
             prompt: [
               {
@@ -146,7 +155,7 @@ async function* run(input: StreamInput) {
             finish(queue, "error")
             return
           }
-          finish(queue, "stop")
+          finish(queue, finishReason(response.stopReason), claudeUsage(response.usage))
         } finally {
           activeConnection.active = undefined
           cleanupTerminals(activeConnection)
@@ -566,11 +575,43 @@ async function collect(stream: ReadableStream<Uint8Array>, output: string[], lim
   }
 }
 
-function finish(queue: ReturnType<typeof makeQueue>, reason: "stop" | "error") {
+function finish(queue: ReturnType<typeof makeQueue>, reason: FinishReason, usage?: Usage) {
   queue.closeBlocks()
-  queue.push(LLMEvent.stepFinish({ index: 0, reason }))
-  queue.push(LLMEvent.finish({ reason }))
+  queue.push(LLMEvent.stepFinish({ index: 0, reason, usage }))
+  queue.push(LLMEvent.finish({ reason, usage }))
   queue.end()
+}
+
+function finishReason(reason: string): FinishReason {
+  if (reason === "end_turn") return "stop"
+  if (reason === "max_tokens") return "length"
+  if (reason === "cancelled") return "error"
+  if (reason === "refusal") return "content-filter"
+  return "unknown"
+}
+
+export function claudeUsage(input: ACPUsage | null | undefined) {
+  if (!input) return
+  const nonCachedInputTokens = token(input.inputTokens)
+  const cacheReadInputTokens = token(input.cachedReadTokens)
+  const cacheWriteInputTokens = token(input.cachedWriteTokens)
+  const inputTokens = (nonCachedInputTokens ?? 0) + (cacheReadInputTokens ?? 0) + (cacheWriteInputTokens ?? 0)
+  return new Usage({
+    inputTokens,
+    outputTokens: token(input.outputTokens),
+    nonCachedInputTokens,
+    cacheReadInputTokens,
+    cacheWriteInputTokens,
+    reasoningTokens: token(input.thoughtTokens),
+    totalTokens: token(input.totalTokens),
+    providerMetadata: { anthropic: input },
+  })
+}
+
+function token(value: number | null | undefined) {
+  if (typeof value !== "number") return
+  if (!Number.isFinite(value)) return
+  return Math.max(0, value)
 }
 
 function promptText(messages: ModelMessage[]) {
