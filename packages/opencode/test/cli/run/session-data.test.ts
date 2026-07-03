@@ -282,6 +282,74 @@ describe("run session data", () => {
     })
   })
 
+  test("uses provider total when formatting footer usage", () => {
+    const out = reduce(
+      createSessionData(),
+      assistant("msg-1", {
+        tokens: {
+          total: 40_578,
+          input: 38,
+          output: 6_476,
+          reasoning: 0,
+          cache: { read: 109_805, write: 15_824 },
+        },
+      }),
+    )
+
+    expect(out.footer?.patch?.usage).toBe("40.6K")
+  })
+
+  test("keeps completed footer usage after a later aborted estimate", () => {
+    let data = createSessionData()
+    const completed = reduce(
+      data,
+      assistant("msg-1", {
+        tokens: {
+          total: 40_578,
+          input: 38,
+          output: 6_476,
+          reasoning: 0,
+          cache: { read: 109_805, write: 15_824 },
+        },
+      }),
+    )
+    data = completed.data
+
+    const aborted = reduce(
+      data,
+      assistant("msg-2", {
+        error: { name: "MessageAbortedError" },
+        tokens: {
+          input: 15_129,
+          output: 1,
+          reasoning: 265,
+          cache: { read: 0, write: 0 },
+        },
+      }),
+    )
+
+    expect(completed.footer?.patch?.usage).toBe("40.6K")
+    expect(aborted.footer?.patch?.usage).toBeUndefined()
+    expect(aborted.data.usage?.text).toBe("40.6K")
+  })
+
+  test("shows aborted footer usage when no completed usage exists", () => {
+    const out = reduce(
+      createSessionData(),
+      assistant("msg-1", {
+        error: { name: "MessageAbortedError" },
+        tokens: {
+          input: 15_129,
+          output: 1,
+          reasoning: 265,
+          cache: { read: 0, write: 0 },
+        },
+      }),
+    )
+
+    expect(out.footer?.patch?.usage).toBe("15.4K")
+  })
+
   test("strips bash echo only from the first assistant flush", () => {
     let data = createSessionData()
     data = reduce(data, assistant("msg-1")).data
