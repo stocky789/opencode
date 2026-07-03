@@ -67,6 +67,11 @@ type ACPUsage = {
   readonly totalTokens: number
 }
 
+type ACPContextUsage = {
+  readonly used: number
+  readonly size: number
+}
+
 type Connection = {
   readonly key: string
   readonly cwd: string
@@ -85,6 +90,7 @@ type Connection = {
     readonly abort: AbortSignal
     readonly ruleset: PermissionV1.Ruleset
     readonly permission: PermissionBridge
+    contextUsage?: ACPContextUsage
   }
   disposeTimer?: ReturnType<typeof setTimeout>
 }
@@ -155,7 +161,11 @@ async function* run(input: StreamInput) {
             finish(queue, "error")
             return
           }
-          finish(queue, finishReason(response.stopReason), claudeUsage(response.usage))
+          finish(
+            queue,
+            finishReason(response.stopReason),
+            claudeUsage(response.usage, activeConnection.active?.contextUsage),
+          )
         } finally {
           activeConnection.active = undefined
           cleanupTerminals(activeConnection)
@@ -342,7 +352,7 @@ function claudeEnv(modelID: string) {
 
 function makeClient(connection: Connection): Client {
   return {
-    sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection.active?.queue, params),
+    sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection, params),
     requestPermission: (params) => requestPermission(connection, params),
     readTextFile: (params) => readTextFile(connection.active?.cwd ?? connection.cwd, params),
     writeTextFile: (params) => writeTextFile(connection.active?.cwd ?? connection.cwd, params),
@@ -354,14 +364,21 @@ function makeClient(connection: Connection): Client {
   }
 }
 
-function sessionUpdate(queue: ReturnType<typeof makeQueue> | undefined, params: SessionNotification) {
-  if (!queue) return
+function sessionUpdate(connection: Connection, params: SessionNotification) {
+  const active = connection.active
+  if (!active) return
+  if (params.update.sessionUpdate === "usage_update") {
+    const used = token(params.update.used)
+    const size = token(params.update.size)
+    if (used !== undefined && size !== undefined) active.contextUsage = { used, size }
+    return
+  }
   if (params.update.sessionUpdate === "agent_message_chunk" && params.update.content.type === "text") {
-    queue.text(params.update.content.text)
+    active.queue.text(params.update.content.text)
     return
   }
   if (params.update.sessionUpdate === "agent_thought_chunk" && params.update.content.type === "text") {
-    queue.reasoning(params.update.content.text)
+    active.queue.reasoning(params.update.content.text)
   }
 }
 
@@ -590,7 +607,7 @@ function finishReason(reason: string): FinishReason {
   return "unknown"
 }
 
-export function claudeUsage(input: ACPUsage | null | undefined) {
+export function claudeUsage(input: ACPUsage | null | undefined, context?: ACPContextUsage) {
   if (!input) return
   const nonCachedInputTokens = token(input.inputTokens)
   const cacheReadInputTokens = token(input.cachedReadTokens)
@@ -603,8 +620,8 @@ export function claudeUsage(input: ACPUsage | null | undefined) {
     cacheReadInputTokens,
     cacheWriteInputTokens,
     reasoningTokens: token(input.thoughtTokens),
-    totalTokens: token(input.totalTokens),
-    providerMetadata: { anthropic: input },
+    totalTokens: context?.used ?? token(input.totalTokens),
+    providerMetadata: { anthropic: context ? { ...input, context } : input },
   })
 }
 
