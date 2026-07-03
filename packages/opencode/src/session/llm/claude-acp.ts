@@ -164,7 +164,13 @@ async function* run(input: StreamInput) {
           activeConnection.used = true
           await new Promise((resolve) => setTimeout(resolve, 50))
           if (input.abort.aborted) {
-            finish(queue, "error")
+            finish(
+              queue,
+              "error",
+              claudeUsage(response.usage, activeConnection.active?.contextUsage) ??
+                claudeContextUsage(activeConnection.active?.contextUsage),
+              claudeProviderMetadata(activeConnection.active?.providerCompacted),
+            )
             return
           }
           finish(
@@ -185,9 +191,15 @@ async function* run(input: StreamInput) {
       })
     } catch (error) {
       if (connection) {
+        const usage = claudeContextUsage(connection.active?.contextUsage)
+        const providerMetadata = claudeProviderMetadata(connection.active?.providerCompacted)
         connection.active = undefined
         cleanupTerminals(connection)
         disposeConnection(connection)
+        if (input.abort.aborted) {
+          finish(queue, "error", usage, providerMetadata)
+          return
+        }
       }
       if (input.abort.aborted) {
         finish(queue, "error")
@@ -643,6 +655,16 @@ export function claudeUsage(input: ACPUsage | null | undefined, context?: ACPCon
     reasoningTokens: token(input.thoughtTokens),
     totalTokens: context?.used ?? token(input.totalTokens),
     providerMetadata: { anthropic: context ? { ...input, context } : input },
+  })
+}
+
+export function claudeContextUsage(context: ACPContextUsage | undefined) {
+  if (!context) return
+  return new Usage({
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: context.used,
+    providerMetadata: { anthropic: { context } },
   })
 }
 
