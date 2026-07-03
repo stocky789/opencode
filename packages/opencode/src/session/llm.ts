@@ -122,7 +122,7 @@ const live: Layer.Layer<
               reply: (request) => Effect.runPromise(perm.reply(request)),
             },
             question: {
-              ask: (request) => Effect.runPromise(question.ask(request)),
+              ask: (request) => Effect.runPromise(question.ask(request), { signal: input.abort }),
             },
           }),
         }

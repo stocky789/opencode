@@ -3,6 +3,7 @@ import {
   claudeACPCompactionStatus,
   claudeACPElicitationContent,
   claudeACPElicitationFields,
+  claudeACPPermissionRuleset,
   claudeContextUsage,
   claudeUsage,
 } from "@/session/llm/claude-acp"
@@ -158,5 +159,19 @@ describe("Claude ACP elicitation", () => {
       sections: ["economy", "politics"],
       limit: 3,
     })
+  })
+})
+
+describe("Claude ACP permissions", () => {
+  it("forces native prompts for explicit ACP permission requests while preserving denies", () => {
+    expect(
+      claudeACPPermissionRuleset("bash", ["bun test"], [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "rm -rf *", action: "deny" },
+      ]),
+    ).toEqual([
+      { permission: "bash", pattern: "bun test", action: "ask" },
+      { permission: "bash", pattern: "rm -rf *", action: "deny" },
+    ])
   })
 })

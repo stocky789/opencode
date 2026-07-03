@@ -5,10 +5,10 @@ import { ClientSideConnection, PROTOCOL_VERSION, RequestError, ndJsonStream } fr
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import type {
   Client,
-  CreateTerminalRequest,
-  CreateTerminalResponse,
   CreateElicitationRequest,
   CreateElicitationResponse,
+  CreateTerminalRequest,
+  CreateTerminalResponse,
   ElicitationContentValue,
   ElicitationPropertySchema,
   KillTerminalRequest,
@@ -435,7 +435,13 @@ async function requestPermission(
   connection: Connection,
   params: RequestPermissionRequest,
 ): Promise<RequestPermissionResponse> {
-  const active = connection.active
+  return requestPermissionForActive(connection.active, params)
+}
+
+async function requestPermissionForActive(
+  active: Connection["active"] | undefined,
+  params: RequestPermissionRequest,
+): Promise<RequestPermissionResponse> {
   if (!active || active.abort.aborted) return cancelledPermission()
 
   const requestID = PermissionV1.ID.ascending()
@@ -455,7 +461,7 @@ async function requestPermission(
       patterns,
       always: permissionAlways(permission, patterns),
       metadata,
-      ruleset: active.ruleset,
+      ruleset: claudeACPPermissionRuleset(permission, patterns, active.ruleset),
     })
     return allowPermission(params, reply)
   } catch {
@@ -530,6 +536,13 @@ function permissionPatterns(
 function permissionAlways(permission: string, patterns: string[]) {
   if (permission === "bash") return patterns
   return ["*"]
+}
+
+export function claudeACPPermissionRuleset(permission: string, patterns: string[], ruleset: PermissionV1.Ruleset) {
+  return [
+    ...patterns.map((pattern) => ({ permission, pattern, action: "ask" as const })),
+    ...ruleset.filter((rule) => rule.action === "deny"),
+  ] satisfies PermissionV1.Ruleset
 }
 
 function allowPermission(params: RequestPermissionRequest, reply: PermissionV1.Reply): RequestPermissionResponse {
