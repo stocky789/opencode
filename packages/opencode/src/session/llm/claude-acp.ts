@@ -118,6 +118,12 @@ type Connection = {
   disposeTimer?: ReturnType<typeof setTimeout>
 }
 
+type ActivePermissionRequest = {
+  readonly sessionID: PermissionV1.AskInput["sessionID"]
+  readonly abort: AbortSignal
+  readonly permission: PermissionBridge
+}
+
 const TEXT_ID = "claude-acp-text"
 const REASONING_ID = "claude-acp-reasoning"
 const IDLE_CLOSE_MS = 10 * 60_000
@@ -438,8 +444,8 @@ async function requestPermission(
   return requestPermissionForActive(connection.active, params)
 }
 
-async function requestPermissionForActive(
-  active: Connection["active"] | undefined,
+export async function requestPermissionForActive(
+  active: ActivePermissionRequest | undefined,
   params: RequestPermissionRequest,
 ): Promise<RequestPermissionResponse> {
   if (!active || active.abort.aborted) return cancelledPermission()
@@ -464,9 +470,16 @@ async function requestPermissionForActive(
       ruleset: claudeACPPermissionRuleset(permission, patterns),
     })
     return allowPermission(params, reply)
-  } catch {
+  } catch (error) {
     if (active.abort.aborted) return cancelledPermission()
-    return rejectPermission(params)
+    if (
+      error instanceof PermissionV1.DeniedError ||
+      error instanceof PermissionV1.RejectedError ||
+      error instanceof PermissionV1.CorrectedError
+    ) {
+      return rejectPermission(params)
+    }
+    return cancelledPermission()
   } finally {
     active.abort.removeEventListener("abort", onAbort)
   }

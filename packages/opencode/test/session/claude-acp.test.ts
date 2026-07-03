@@ -4,9 +4,13 @@ import {
   claudeACPElicitationContent,
   claudeACPElicitationFields,
   claudeACPPermissionRuleset,
+  requestPermissionForActive,
   claudeContextUsage,
   claudeUsage,
 } from "@/session/llm/claude-acp"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import type { RequestPermissionRequest } from "@agentclientprotocol/sdk"
+import { SessionID } from "../../src/session/schema"
 
 describe("Claude ACP compaction status", () => {
   it("recognizes Claude ACP compaction control messages", () => {
@@ -170,4 +174,60 @@ describe("Claude ACP permissions", () => {
       { permission: "bash", pattern: "bun test", action: "ask" },
     ])
   })
+
+  it("cancels ACP permission requests when the OpenCode bridge fails before user selection", async () => {
+    const abort = new AbortController()
+
+    const result = await requestPermissionForActive(
+      {
+        sessionID: SessionID.make("ses_test"),
+        abort: abort.signal,
+        permission: {
+          ask: async () => {
+            throw new PermissionV1.NotFoundError({ requestID: PermissionV1.ID.make("per_missing") })
+          },
+          reply: async () => {},
+        },
+      },
+      permissionRequest(),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "cancelled" } })
+  })
+
+  it("keeps explicit OpenCode permission rejections as ACP reject selections", async () => {
+    const abort = new AbortController()
+
+    const result = await requestPermissionForActive(
+      {
+        sessionID: SessionID.make("ses_test"),
+        abort: abort.signal,
+        permission: {
+          ask: async () => {
+            throw new PermissionV1.RejectedError()
+          },
+          reply: async () => {},
+        },
+      },
+      permissionRequest(),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "selected", optionId: "deny" } })
+  })
 })
+
+function permissionRequest() {
+  return {
+    sessionId: "claude_session",
+    toolCall: {
+      toolCallId: "call_1",
+      kind: "execute",
+      title: "printf hello",
+      rawInput: { command: "printf hello" },
+    },
+    options: [
+      { optionId: "allow", kind: "allow_once", name: "Allow" },
+      { optionId: "deny", kind: "reject_once", name: "Deny" },
+    ],
+  } satisfies RequestPermissionRequest
+}
