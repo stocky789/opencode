@@ -45,6 +45,20 @@
 
 ### Installation
 
+#### Feature Branch
+
+This branch includes the Claude ACP wrapper changes. Install or update this `features` branch directly with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://git.stockhome.com.au/stocky789/opencode/raw/branch/features/script/install-features.ps1 | iex"
+```
+
+```bash
+curl -fsSL https://git.stockhome.com.au/stocky789/opencode/raw/branch/features/script/install-features.sh | bash
+```
+
+The installer clones `https://git.stockhome.com.au/stocky789/opencode.git#features`, installs dependencies, and creates `opencode` plus `opencode-features` launchers. It requires Git and installs Bun automatically if missing.
+
 ```bash
 # YOLO
 curl -fsSL https://opencode.ai/install | bash
