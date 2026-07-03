@@ -365,6 +365,40 @@ describe("run session data", () => {
     expect(aborted.data.usage?.text).toBe("57.5K")
   })
 
+  test("does not lower footer usage when a later completed turn reports fewer tokens", () => {
+    let data = createSessionData()
+    const first = reduce(
+      data,
+      assistant("msg-1", {
+        tokens: {
+          total: 44_044,
+          input: 106,
+          output: 8_740,
+          reasoning: 0,
+          cache: { read: 451_001, write: 22_516 },
+        },
+      }),
+    )
+    data = first.data
+
+    const later = reduce(
+      data,
+      assistant("msg-2", {
+        tokens: {
+          total: 29_240,
+          input: 10,
+          output: 450,
+          reasoning: 0,
+          cache: { read: 21_158, write: 7_622 },
+        },
+      }),
+    )
+
+    expect(first.footer?.patch?.usage).toBe("44.0K")
+    expect(later.footer?.patch?.usage).toBeUndefined()
+    expect(later.data.usage?.text).toBe("44.0K")
+  })
+
   test("shows aborted footer usage when no completed usage exists", () => {
     const out = reduce(
       createSessionData(),
