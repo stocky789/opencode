@@ -1,204 +1,177 @@
-import { describe, expect, test } from "bun:test"
-import type { CreateElicitationRequest, RequestPermissionRequest } from "@agentclientprotocol/sdk"
-import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { SessionID } from "../../src/session/schema"
-import { ClaudeACPTest } from "../../src/session/llm/claude-acp"
+import { describe, expect, it } from "bun:test"
+import {
+  claudeACPCompactionStatus,
+  claudeACPElicitationContent,
+  claudeACPElicitationFields,
+  claudeACPPermissionRuleset,
+  claudeContextUsage,
+  claudeUsage,
+} from "@/session/llm/claude-acp"
 
-const sessionID = SessionID.make("ses_claude_acp")
-
-describe("Claude ACP adapter", () => {
-  test("routes ACP permission requests through native permission prompts", async () => {
-    const harness = createHarness({ permissionReply: "once" })
-    const response = await ClaudeACPTest.requestPermissionForActive(harness.active, executePermission())
-
-    expect(harness.permissions).toHaveLength(1)
-    expect(harness.permissions[0]).toMatchObject({
-      sessionID,
-      permission: "bash",
-      patterns: ["bun test"],
-      always: ["bun test"],
-      metadata: {
-        command: "bun test",
-        kind: "execute",
-        title: "bun test",
-        toolCallId: "tool_execute",
-      },
-      ruleset: [{ permission: "bash", pattern: "bun test", action: "ask" }],
-    })
-    expect(response).toEqual({ outcome: { outcome: "selected", optionId: "allow" } })
+describe("Claude ACP compaction status", () => {
+  it("recognizes Claude ACP compaction control messages", () => {
+    expect(claudeACPCompactionStatus("Compacting...")).toBe("started")
+    expect(claudeACPCompactionStatus("\n\nCompacting completed.")).toBe("completed")
+    expect(claudeACPCompactionStatus("Compacting failed: too much context")).toBeUndefined()
+    expect(claudeACPCompactionStatus("Compacting the answer now.")).toBeUndefined()
   })
+})
 
-  test("returns the ACP always-allow option when native permission allows always", async () => {
-    const harness = createHarness({ permissionReply: "always" })
-    const response = await ClaudeACPTest.requestPermissionForActive(harness.active, executePermission())
-
-    expect(response).toEqual({ outcome: { outcome: "selected", optionId: "allow_always" } })
-  })
-
-  test("forces native prompts for explicit ACP permission requests", async () => {
-    const harness = createHarness({
-      permissionReply: "once",
-      ruleset: [{ permission: "*", pattern: "*", action: "allow" }],
+describe("Claude ACP usage", () => {
+  it("maps ACP usage into inclusive OpenCode token usage", () => {
+    const usage = claudeUsage({
+      inputTokens: 100,
+      outputTokens: 25,
+      cachedReadTokens: 30,
+      cachedWriteTokens: 10,
+      thoughtTokens: 5,
+      totalTokens: 165,
     })
 
-    await ClaudeACPTest.requestPermissionForActive(harness.active, executePermission())
-
-    expect(harness.permissions[0]?.ruleset).toEqual([{ permission: "bash", pattern: "bun test", action: "ask" }])
+    expect(usage?.inputTokens).toBe(140)
+    expect(usage?.nonCachedInputTokens).toBe(100)
+    expect(usage?.cacheReadInputTokens).toBe(30)
+    expect(usage?.cacheWriteInputTokens).toBe(10)
+    expect(usage?.outputTokens).toBe(25)
+    expect(usage?.reasoningTokens).toBe(5)
+    expect(usage?.totalTokens).toBe(165)
   })
 
-  test("advertises form elicitation so Claude can ask interactive questions", () => {
-    expect(ClaudeACPTest.clientCapabilities()).toMatchObject({
-      elicitation: { form: {} },
-    })
-  })
-
-  test("routes ACP form elicitation through native question prompts", async () => {
-    const harness = createHarness({ questionAnswers: [["Minimal"], ["UI", "Tests"]] })
-    const response = await ClaudeACPTest.createElicitationForActive(harness.active, askUserQuestionElicitation())
-
-    expect(harness.questions).toEqual([
+  it("uses ACP context usage as the reported total when available", () => {
+    const usage = claudeUsage(
       {
-        sessionID,
-        questions: [
-          {
-            question: "Which implementation path should Claude take?",
-            header: "Approach",
-            options: [
-              { label: "Minimal", description: "Small scoped fix" },
-              { label: "Broad", description: "Larger refactor" },
-            ],
-            custom: true,
-          },
-          {
-            question: "Which areas should Claude inspect?",
-            header: "Areas",
-            options: [
-              { label: "UI", description: "UI" },
-              { label: "Tests", description: "Tests" },
-            ],
-            multiple: true,
-          },
-        ],
+        inputTokens: 100,
+        outputTokens: 25,
+        cachedReadTokens: 30,
+        cachedWriteTokens: 10,
+        totalTokens: 165,
       },
-    ])
-    expect(response).toEqual({
-      action: "accept",
-      content: {
-        question_0: "Minimal",
-        question_1: ["UI", "Tests"],
-      },
+      { used: 32_000, size: 1_000_000 },
+    )
+
+    expect(usage?.inputTokens).toBe(140)
+    expect(usage?.outputTokens).toBe(25)
+    expect(usage?.totalTokens).toBe(32_000)
+    expect(usage?.providerMetadata?.anthropic).toEqual({
+      inputTokens: 100,
+      outputTokens: 25,
+      cachedReadTokens: 30,
+      cachedWriteTokens: 10,
+      totalTokens: 165,
+      context: { used: 32_000, size: 1_000_000 },
     })
   })
 
-  test("sends custom answers back using Claude's custom field", async () => {
-    const harness = createHarness({ questionAnswers: [["Use the existing permission footer"], []] })
-    const response = await ClaudeACPTest.createElicitationForActive(harness.active, askUserQuestionElicitation())
+  it("omits usage when Claude ACP does not report it", () => {
+    expect(claudeUsage(undefined)).toBeUndefined()
+    expect(claudeUsage(null)).toBeUndefined()
+  })
 
-    expect(response).toEqual({
-      action: "accept",
-      content: {
-        question_0_custom: "Use the existing permission footer",
-      },
+  it("creates context-only usage from ACP usage updates", () => {
+    const usage = claudeContextUsage({ used: 48_000, size: 200_000 })
+
+    expect(usage?.inputTokens).toBe(0)
+    expect(usage?.outputTokens).toBe(0)
+    expect(usage?.totalTokens).toBe(48_000)
+    expect(usage?.providerMetadata?.anthropic).toEqual({
+      context: { used: 48_000, size: 200_000 },
     })
   })
 })
 
-function createHarness(input: {
-  readonly permissionReply?: PermissionV1.Reply
-  readonly questionAnswers?: readonly (readonly string[])[]
-  readonly ruleset?: PermissionV1.Ruleset
-}) {
-  const permissions: PermissionV1.AskInput[] = []
-  const questions: Array<{
-    readonly sessionID: typeof sessionID
-    readonly questions: readonly {
-      readonly question: string
-      readonly header: string
-      readonly options: readonly { readonly label: string; readonly description: string }[]
-      readonly multiple?: boolean
-      readonly custom?: boolean
-    }[]
-  }> = []
-  const abort = new AbortController()
-  return {
-    active: {
-      sessionID,
-      abort: abort.signal,
-      ruleset: input.ruleset ?? ([{ permission: "bash", pattern: "*", action: "ask" }] satisfies PermissionV1.Ruleset),
-      permission: {
-        ask: (request: PermissionV1.AskInput) => {
-          permissions.push(request)
-          return Promise.resolve(input.permissionReply ?? "once")
-        },
-        reply: () => Promise.resolve(),
-      },
-      question: {
-        ask: (request: (typeof questions)[number]) => {
-          questions.push(request)
-          return Promise.resolve(input.questionAnswers ?? [])
-        },
-      },
-    },
-    permissions,
-    questions,
-  }
-}
-
-function executePermission(): RequestPermissionRequest {
-  return {
-    sessionId: "claude_session",
-    toolCall: {
-      toolCallId: "tool_execute",
-      status: "pending",
-      title: "bun test",
-      kind: "execute",
-      rawInput: { command: "bun test" },
-      locations: [],
-    },
-    options: [
-      { optionId: "allow_always", kind: "allow_always", name: "Allow always" },
-      { optionId: "allow", kind: "allow_once", name: "Allow" },
-      { optionId: "reject", kind: "reject_once", name: "Reject" },
-    ],
-  }
-}
-
-function askUserQuestionElicitation(): CreateElicitationRequest {
-  return {
-    mode: "form",
-    sessionId: "claude_session",
-    toolCallId: "tool_question",
-    message: "Claude needs more input",
-    requestedSchema: {
-      type: "object",
-      properties: {
-        question_0: {
-          type: "string",
-          title: "Approach",
-          description: "Which implementation path should Claude take?",
-          oneOf: [
-            { const: "Minimal", title: "Small scoped fix" },
-            { const: "Broad", title: "Larger refactor" },
-          ],
-        },
-        question_0_custom: {
-          type: "string",
-          title: "Custom approach",
-          description: "Custom approach",
-        },
-        question_1: {
-          type: "array",
-          title: "Areas",
-          description: "Which areas should Claude inspect?",
-          items: {
-            anyOf: [
-              { const: "UI", title: "UI" },
-              { const: "Tests", title: "Tests" },
+describe("Claude ACP elicitation", () => {
+  it("maps ACP form enum choices through OpenCode questions", () => {
+    const fields = claudeACPElicitationFields({
+      mode: "form",
+      sessionId: "ses_123",
+      message: "Choose research depth",
+      requestedSchema: {
+        properties: {
+          depth: {
+            type: "string",
+            title: "Depth",
+            oneOf: [
+              { title: "Quick", const: "quick" },
+              { title: "Deep", const: "deep" },
             ],
+          },
+          includeSources: {
+            type: "boolean",
+            title: "Include sources",
           },
         },
       },
-      required: ["question_0"],
-    },
-  }
-}
+    })
+
+    expect(fields.map((field) => field.question)).toEqual([
+      {
+        header: "Depth",
+        question: "Depth",
+        options: [
+          { label: "Quick", description: "quick" },
+          { label: "Deep", description: "deep" },
+        ],
+        custom: false,
+      },
+      {
+        header: "Include sources",
+        question: "Include sources",
+        options: [
+          { label: "Yes", description: "Choose research depth" },
+          { label: "No", description: "Choose research depth" },
+        ],
+        custom: false,
+      },
+    ])
+    expect(claudeACPElicitationContent(fields, [["Deep"], ["Yes"]])).toEqual({
+      depth: "deep",
+      includeSources: true,
+    })
+  })
+
+  it("maps ACP multi-select and numeric answers back to content values", () => {
+    const fields = claudeACPElicitationFields({
+      mode: "form",
+      sessionId: "ses_123",
+      message: "Configure report",
+      requestedSchema: {
+        properties: {
+          sections: {
+            type: "array",
+            title: "Sections",
+            items: {
+              anyOf: [
+                { title: "Economy", const: "economy" },
+                { title: "Politics", const: "politics" },
+              ],
+            },
+          },
+          limit: {
+            type: "integer",
+            title: "Limit",
+          },
+        },
+      },
+    })
+
+    expect(fields[0]?.question.multiple).toBe(true)
+    expect(claudeACPElicitationContent(fields, [["Economy", "Politics"], ["3"]])).toEqual({
+      sections: ["economy", "politics"],
+      limit: 3,
+    })
+  })
+})
+
+describe("Claude ACP permissions", () => {
+  it("forces native prompts for explicit ACP permission requests while preserving denies", () => {
+    expect(
+      claudeACPPermissionRuleset("bash", ["bun test"], [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "rm -rf *", action: "deny" },
+      ]),
+    ).toEqual([
+      { permission: "bash", pattern: "bun test", action: "ask" },
+      { permission: "bash", pattern: "rm -rf *", action: "deny" },
+    ])
+  })
+})

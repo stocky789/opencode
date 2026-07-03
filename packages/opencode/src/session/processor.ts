@@ -22,6 +22,7 @@ import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
+import { Token } from "@/util/token"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
@@ -72,6 +73,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  interruptedInputTokens: number
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +113,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        interruptedInputTokens: 0,
       }
       let aborted = false
 
@@ -209,6 +212,62 @@ const layer = Layer.effect(
         ctx.reasoningMap[reasoningID].time = { ...ctx.reasoningMap[reasoningID].time, end: Date.now() }
         yield* session.updatePart(ctx.reasoningMap[reasoningID])
         delete ctx.reasoningMap[reasoningID]
+      })
+
+      const recordProviderCompaction = Effect.fn("SessionProcessor.recordProviderCompaction")(function* (
+        metadata: Record<string, Record<string, unknown>> | undefined,
+      ) {
+        if (!providerCompacted(metadata)) return
+        const parts = yield* MessageV2.parts(ctx.assistantMessage.parentID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        if (parts.some((part) => part.type === "compaction")) return
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: ctx.assistantMessage.parentID,
+          sessionID: ctx.sessionID,
+          type: "compaction",
+          auto: true,
+        })
+      })
+
+      const recordInterruptedUsage = Effect.fn("SessionProcessor.recordInterruptedUsage")(function* () {
+        if (!aborted) return
+        if (tokenTotal(ctx.assistantMessage.tokens) > 0) return
+        const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        if (parts.some((part) => part.type === "step-finish")) return
+        const usage = {
+          cost: 0,
+          tokens: {
+            input: ctx.interruptedInputTokens,
+            output: Token.estimate(
+              JSON.stringify(
+                parts.flatMap((part) => {
+                  if (part.type === "text") return [part.text]
+                  if (part.type === "tool") return [JSON.stringify(part.state)]
+                  return []
+                }),
+              ),
+            ),
+            reasoning: Token.estimate(
+              JSON.stringify(parts.flatMap((part) => (part.type === "reasoning" ? [part.text] : []))),
+            ),
+            cache: { read: 0, write: 0 },
+          },
+        }
+        if (tokenTotal(usage.tokens) <= 0) return
+        ctx.assistantMessage.tokens = usage.tokens
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          reason: "error",
+          messageID: ctx.assistantMessage.id,
+          sessionID: ctx.assistantMessage.sessionID,
+          type: "step-finish",
+          tokens: usage.tokens,
+          cost: usage.cost,
+        })
       })
 
       const ensureToolCall = Effect.fn("SessionProcessor.ensureToolCall")(function* (input: {
@@ -452,6 +511,7 @@ const layer = Layer.effect(
               cost: usage.cost,
             })
             yield* session.updateMessage(ctx.assistantMessage)
+            yield* recordProviderCompaction(value.providerMetadata)
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
@@ -590,6 +650,7 @@ const layer = Layer.effect(
           })
         }
         ctx.toolcalls = {}
+        yield* recordInterruptedUsage()
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
       })
@@ -629,6 +690,9 @@ const layer = Layer.effect(
         })
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        ctx.interruptedInputTokens = Token.estimate(
+          JSON.stringify({ system: streamInput.system, messages: streamInput.messages }),
+        )
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
@@ -712,5 +776,13 @@ export const node = LayerNode.make({
     Database.node,
   ],
 })
+
+function providerCompacted(metadata: Record<string, Record<string, unknown>> | undefined) {
+  return metadata?.anthropic?.acpCompacted === true
+}
+
+function tokenTotal(tokens: SessionV1.Assistant["tokens"]) {
+  return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+}
 
 export * as SessionProcessor from "./processor"

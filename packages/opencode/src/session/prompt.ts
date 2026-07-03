@@ -8,7 +8,7 @@ import { MessageV2 } from "./message-v2"
 import { SessionRevert } from "./revert"
 import { Session } from "./session"
 import { Agent } from "../agent/agent"
-import { Provider } from "@/provider/provider"
+import { ClaudeACPProviderID, Provider } from "@/provider/provider"
 
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
@@ -198,6 +198,7 @@ const layer = Layer.effect(
     }) {
       if (input.session.parentID) return
       if (!Session.isDefaultTitle(input.session.title)) return
+      if (input.providerID === ClaudeACPProviderID) return
 
       const real = (m: SessionV1.WithParts) =>
         m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)

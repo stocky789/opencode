@@ -35,6 +35,7 @@ const money = new Intl.NumberFormat("en-US", {
 })
 
 type Tokens = {
+  total?: number
   input?: number
   output?: number
   reasoning?: number
@@ -86,6 +87,11 @@ export type SessionData = {
   visible: Map<string, string>
   end: Set<string>
   echo: Map<string, Set<string>>
+  usage: {
+    text: string
+    tokens: number
+    aborted: boolean
+  } | undefined
 }
 
 export type SessionDataInput = {
@@ -124,6 +130,7 @@ export function createSessionData(
     visible: new Map(),
     end: new Set(),
     echo: new Map(),
+    usage: undefined,
   }
 }
 
@@ -135,17 +142,18 @@ function formatUsage(
   tokens: Tokens | undefined,
   limit: number | undefined,
   cost: number | undefined,
-): string | undefined {
+): { text: string; tokens: number } | undefined {
   const total =
+    tokens?.total ??
     (tokens?.input ?? 0) +
-    (tokens?.output ?? 0) +
-    (tokens?.reasoning ?? 0) +
-    (tokens?.cache?.read ?? 0) +
-    (tokens?.cache?.write ?? 0)
+      (tokens?.output ?? 0) +
+      (tokens?.reasoning ?? 0) +
+      (tokens?.cache?.read ?? 0) +
+      (tokens?.cache?.write ?? 0)
 
   if (total <= 0) {
     if (typeof cost === "number" && cost > 0) {
-      return money.format(cost)
+      return { text: money.format(cost), tokens: 0 }
     }
     return undefined
   }
@@ -154,10 +162,10 @@ function formatUsage(
     limit && limit > 0 ? `${Locale.number(total)} (${Math.round((total / limit) * 100)}%)` : Locale.number(total)
 
   if (typeof cost === "number" && cost > 0) {
-    return `${text} · ${money.format(cost)}`
+    return { text: `${text} · ${money.format(cost)}`, tokens: total }
   }
 
-  return text
+  return { text, tokens: total }
 }
 
 export function formatError(error: {
@@ -184,6 +192,15 @@ export function formatError(error: {
 
 function isAbort(error: { name?: string } | undefined): boolean {
   return error?.name === "MessageAbortedError"
+}
+
+function updateUsage(data: SessionData, usage: { text: string; tokens: number } | undefined, aborted: boolean) {
+  if (!usage) return undefined
+  if (!data.usage || usage.tokens >= data.usage.tokens) {
+    data.usage = { ...usage, aborted }
+    return usage.text
+  }
+  return undefined
 }
 
 function msgErr(id: string): string {
@@ -848,10 +865,11 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
       input.limits[modelKey(info.providerID, info.modelID)],
       typeof info.cost === "number" ? info.cost : undefined,
     )
-    if (usage) {
+    const nextUsage = updateUsage(data, usage, isAbort(info.error))
+    if (nextUsage) {
       next = {
         ...next,
-        usage,
+        usage: nextUsage,
       }
     }
 

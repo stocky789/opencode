@@ -112,6 +112,7 @@ const live: Layer.Layer<
             cwd: process.cwd(),
             sessionID: input.sessionID,
             modelID: input.model.id,
+            agent: input.agent.name,
             mcpServers: claudeMcpServers(cfg),
             messages: input.messages,
             abort: input.abort,
