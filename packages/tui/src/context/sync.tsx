@@ -51,29 +51,6 @@ function search<T>(items: T[], target: string, key: (item: T) => string) {
   return { found: false, index: left }
 }
 
-function groupedRequests<T extends { id: string; sessionID: string }>(items: T[]) {
-  return items.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((acc, item) => {
-    acc[item.sessionID] = [...(acc[item.sessionID] ?? []), item]
-    return acc
-  }, {})
-}
-
-function mergeGroupedRequests<T extends { id: string; sessionID: string }>(
-  current: Record<string, T[]>,
-  incoming: T[],
-  settled: Set<string>,
-) {
-  return groupedRequests(
-    Array.from(
-      new Map(
-        [...Object.values(current).flat(), ...incoming]
-          .filter((item) => !settled.has(item.id))
-          .map((item) => [item.id, item]),
-      ).values(),
-    ),
-  )
-}
-
 export const {
   context: SyncContext,
   use: useSync,
@@ -167,8 +144,6 @@ export const {
     const fullSyncedSessions = new Set<string>()
     const syncingSessions = new Map<string, Promise<void>>()
     const hydratingSessions = new Map<string, { messages: Set<string>; parts: Set<string> }>()
-    const settledPermissions = new Set<string>()
-    const settledQuestions = new Set<string>()
     const touchMessage = (sessionID: string, messageID: string) => {
       hydratingSessions.get(sessionID)?.messages.add(messageID)
     }
@@ -198,7 +173,6 @@ export const {
           void bootstrap()
           break
         case "permission.replied": {
-          settledPermissions.add(event.properties.requestID)
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -215,7 +189,6 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
-          settledPermissions.delete(request.id)
           if (permission.mode === "auto") {
             void sdk.client.permission.reply({
               requestID: request.id,
@@ -247,7 +220,6 @@ export const {
 
         case "question.replied":
         case "question.rejected": {
-          settledQuestions.add(event.properties.requestID)
           const requests = store.question[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -264,7 +236,6 @@ export const {
 
         case "question.asked": {
           const request = event.properties
-          settledQuestions.delete(request.id)
           const requests = store.question[request.sessionID]
           if (!requests) {
             setStore("question", request.sessionID, [request])
@@ -550,22 +521,6 @@ export const {
               .list({ workspace })
               .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-            sdk.client.permission
-              .list({ workspace })
-              .then((x) =>
-                setStore(
-                  "permission",
-                  reconcile(mergeGroupedRequests(store.permission, x.data ?? [], settledPermissions)),
-                ),
-              ),
-            sdk.client.question
-              .list({ workspace })
-              .then((x) =>
-                setStore(
-                  "question",
-                  reconcile(mergeGroupedRequests(store.question, x.data ?? [], settledQuestions)),
-                ),
-              ),
             sdk.client.session.status({ workspace }).then((x) => {
               setStore("session_status", reconcile(x.data ?? {}))
             }),

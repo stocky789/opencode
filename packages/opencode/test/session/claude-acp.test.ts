@@ -163,11 +163,15 @@ describe("Claude ACP elicitation", () => {
 })
 
 describe("Claude ACP permissions", () => {
-  it("forces native prompts for explicit ACP permission requests over inherited denies", () => {
+  it("forces native prompts for explicit ACP permission requests while preserving denies", () => {
     expect(
-      claudeACPPermissionRuleset("bash", ["bun test"]),
+      claudeACPPermissionRuleset("bash", ["bun test"], [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "rm -rf *", action: "deny" },
+      ]),
     ).toEqual([
       { permission: "bash", pattern: "bun test", action: "ask" },
+      { permission: "bash", pattern: "rm -rf *", action: "deny" },
     ])
   })
 })

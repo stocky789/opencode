@@ -461,7 +461,7 @@ async function requestPermissionForActive(
       patterns,
       always: permissionAlways(permission, patterns),
       metadata,
-      ruleset: claudeACPPermissionRuleset(permission, patterns),
+      ruleset: claudeACPPermissionRuleset(permission, patterns, active.ruleset),
     })
     return allowPermission(params, reply)
   } catch {
@@ -538,8 +538,11 @@ function permissionAlways(permission: string, patterns: string[]) {
   return ["*"]
 }
 
-export function claudeACPPermissionRuleset(permission: string, patterns: string[]) {
-  return patterns.map((pattern) => ({ permission, pattern, action: "ask" as const })) satisfies PermissionV1.Ruleset
+export function claudeACPPermissionRuleset(permission: string, patterns: string[], ruleset: PermissionV1.Ruleset) {
+  return [
+    ...patterns.map((pattern) => ({ permission, pattern, action: "ask" as const })),
+    ...ruleset.filter((rule) => rule.action === "deny"),
+  ] satisfies PermissionV1.Ruleset
 }
 
 function allowPermission(params: RequestPermissionRequest, reply: PermissionV1.Reply): RequestPermissionResponse {
