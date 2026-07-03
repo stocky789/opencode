@@ -38,6 +38,7 @@ type StreamInput = {
   readonly cwd: string
   readonly sessionID: PermissionV1.AskInput["sessionID"]
   readonly modelID: string
+  readonly agent: string
   readonly mcpServers: readonly McpServer[]
   readonly messages: ModelMessage[]
   readonly abort: AbortSignal
@@ -72,6 +73,10 @@ type ACPContextUsage = {
   readonly size: number
 }
 
+type ACPProviderMetadata = {
+  readonly anthropic: Record<string, unknown>
+}
+
 type Connection = {
   readonly key: string
   readonly cwd: string
@@ -91,6 +96,7 @@ type Connection = {
     readonly ruleset: PermissionV1.Ruleset
     readonly permission: PermissionBridge
     contextUsage?: ACPContextUsage
+    providerCompacted?: boolean
   }
   disposeTimer?: ReturnType<typeof setTimeout>
 }
@@ -165,11 +171,16 @@ async function* run(input: StreamInput) {
             queue,
             finishReason(response.stopReason),
             claudeUsage(response.usage, activeConnection.active?.contextUsage),
+            claudeProviderMetadata(activeConnection.active?.providerCompacted),
           )
         } finally {
+          const providerCompacted = activeConnection.active?.providerCompacted === true
           activeConnection.active = undefined
           cleanupTerminals(activeConnection)
-          scheduleDispose(activeConnection)
+          // OpenCode compaction rewrites our stored history, but Claude Code keeps its own ACP session history.
+          // Start the next turn in a fresh Claude session so it is seeded from the compacted transcript.
+          if (input.agent === "compaction" || providerCompacted) disposeConnection(activeConnection)
+          else scheduleDispose(activeConnection)
         }
       })
     } catch (error) {
@@ -374,6 +385,11 @@ function sessionUpdate(connection: Connection, params: SessionNotification) {
     return
   }
   if (params.update.sessionUpdate === "agent_message_chunk" && params.update.content.type === "text") {
+    const compaction = claudeACPCompactionStatus(params.update.content.text)
+    if (compaction) {
+      if (compaction === "completed") active.providerCompacted = true
+      return
+    }
     active.queue.text(params.update.content.text)
     return
   }
@@ -592,10 +608,15 @@ async function collect(stream: ReadableStream<Uint8Array>, output: string[], lim
   }
 }
 
-function finish(queue: ReturnType<typeof makeQueue>, reason: FinishReason, usage?: Usage) {
+function finish(
+  queue: ReturnType<typeof makeQueue>,
+  reason: FinishReason,
+  usage?: Usage,
+  providerMetadata?: ACPProviderMetadata,
+) {
   queue.closeBlocks()
-  queue.push(LLMEvent.stepFinish({ index: 0, reason, usage }))
-  queue.push(LLMEvent.finish({ reason, usage }))
+  queue.push(LLMEvent.stepFinish({ index: 0, reason, usage, providerMetadata }))
+  queue.push(LLMEvent.finish({ reason, usage, providerMetadata }))
   queue.end()
 }
 
@@ -623,6 +644,18 @@ export function claudeUsage(input: ACPUsage | null | undefined, context?: ACPCon
     totalTokens: context?.used ?? token(input.totalTokens),
     providerMetadata: { anthropic: context ? { ...input, context } : input },
   })
+}
+
+export function claudeACPCompactionStatus(text: string) {
+  const normalized = text.trim()
+  if (normalized === "Compacting...") return "started"
+  if (normalized === "Compacting completed.") return "completed"
+  return undefined
+}
+
+function claudeProviderMetadata(providerCompacted: boolean | undefined): ACPProviderMetadata | undefined {
+  if (!providerCompacted) return
+  return { anthropic: { acpCompacted: true } }
 }
 
 function token(value: number | null | undefined) {
