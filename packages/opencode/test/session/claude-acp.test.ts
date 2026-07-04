@@ -1,17 +1,22 @@
 import { describe, expect, it } from "bun:test"
 import {
+  claudeACPAppendOutput,
   claudeACPCompactionStatus,
+  claudeACPConnectionKey,
+  claudeACPDirectPermissionChecks,
   claudeACPElicitationContent,
   claudeACPElicitationFields,
-  claudeACPPermissionRuleset,
+  claudeACPTerminalOutputLimit,
+  claudeACPToolEvents,
   requestPermissionForActive,
   resolveACPPath,
   claudeContextUsage,
   claudeUsage,
 } from "@/session/llm/claude-acp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import type { RequestPermissionRequest } from "@agentclientprotocol/sdk"
+import type { RequestPermissionRequest, SessionNotification } from "@agentclientprotocol/sdk"
 import { SessionID } from "../../src/session/schema"
+import { Permission } from "@/permission"
 
 describe("Claude ACP compaction status", () => {
   it("recognizes Claude ACP compaction control messages", () => {
@@ -81,6 +86,85 @@ describe("Claude ACP usage", () => {
     expect(usage?.providerMetadata?.anthropic).toEqual({
       context: { used: 48_000, size: 200_000 },
     })
+  })
+})
+
+describe("Claude ACP connection key", () => {
+  it("changes when the agent or system context changes", () => {
+    const base = {
+      sessionID: SessionID.make("ses_test"),
+      cwd: "C:/Users/matt/Projects/opencode",
+      modelID: "claude",
+      agent: "build",
+      mcpServers: [],
+      messages: [{ role: "system" as const, content: "Use build instructions" }, { role: "user" as const, content: "hi" }],
+    }
+
+    expect(claudeACPConnectionKey(base)).not.toBe(claudeACPConnectionKey({ ...base, agent: "review" }))
+    expect(claudeACPConnectionKey(base)).not.toBe(
+      claudeACPConnectionKey({
+        ...base,
+        messages: [
+          { role: "system" as const, content: "Use review instructions" },
+          { role: "user" as const, content: "hi" },
+        ],
+      }),
+    )
+    expect(claudeACPConnectionKey(base)).toBe(
+      claudeACPConnectionKey({
+        ...base,
+        messages: [{ role: "system" as const, content: "Use build instructions" }, { role: "user" as const, content: "next" }],
+      }),
+    )
+  })
+})
+
+describe("Claude ACP tool updates", () => {
+  it("maps ACP tool completion to provider-executed LLM tool events", () => {
+    const state = new Map()
+    const events = [
+      ...claudeACPToolEvents(state, toolUpdate({ sessionUpdate: "tool_call", status: "in_progress" })),
+      ...claudeACPToolEvents(
+        state,
+        toolUpdate({
+          sessionUpdate: "tool_call_update",
+          status: "completed",
+          rawOutput: { output: "README contents" },
+        }),
+      ),
+    ]
+
+    expect(events.map((event) => event.type)).toEqual(["tool-call", "tool-result"])
+    expect(events[0]).toMatchObject({
+      type: "tool-call",
+      id: "call_read",
+      name: "read",
+      input: { filePath: "README.md" },
+      providerExecuted: true,
+    })
+    expect(events[1]).toMatchObject({
+      type: "tool-result",
+      id: "call_read",
+      name: "read",
+      providerExecuted: true,
+      result: {
+        type: "json",
+        value: {
+          title: "Read README.md",
+          output: "README contents",
+        },
+      },
+    })
+  })
+
+  it("maps ACP tool failures to LLM tool errors", () => {
+    const events = [
+      ...claudeACPToolEvents(new Map(), toolUpdate({ sessionUpdate: "tool_call_update", status: "failed", rawOutput: "denied" })),
+    ]
+
+    expect(events).toHaveLength(2)
+    expect(events[0]).toMatchObject({ type: "tool-call", id: "call_read", name: "read", providerExecuted: true })
+    expect(events[1]).toMatchObject({ type: "tool-error", id: "call_read", name: "read", message: "denied" })
   })
 })
 
@@ -168,12 +252,85 @@ describe("Claude ACP elicitation", () => {
 })
 
 describe("Claude ACP permissions", () => {
-  it("forces native prompts for explicit ACP permission requests over inherited denies", () => {
-    expect(
-      claudeACPPermissionRuleset("bash", ["bun test"]),
-    ).toEqual([
-      { permission: "bash", pattern: "bun test", action: "ask" },
-    ])
+  it("does not widen one-time OpenCode approval to ACP allow-always", async () => {
+    const result = await requestPermissionForActive(
+      activePermission({
+        ask: async () => "once",
+      }),
+      permissionRequest([
+        { optionId: "always", kind: "allow_always", name: "Always allow" },
+        { optionId: "deny", kind: "reject_once", name: "Deny" },
+      ]),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "cancelled" } })
+  })
+
+  it("keeps OpenCode always approvals as ACP allow-once selections", async () => {
+    const result = await requestPermissionForActive(
+      activePermission({
+        ask: async () => "always",
+      }),
+      permissionRequest([
+        { optionId: "allow", kind: "allow_once", name: "Allow" },
+        { optionId: "always", kind: "allow_always", name: "Always allow" },
+        { optionId: "deny", kind: "reject_once", name: "Deny" },
+      ]),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } })
+  })
+
+  it("honors denied rules from the active OpenCode ruleset", async () => {
+    const ruleset: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "deny" }]
+    const asked: PermissionV1.AskInput[] = []
+
+    const result = await requestPermissionForActive(
+      activePermission({
+        ruleset,
+        ask: askByRuleset(asked),
+      }),
+      permissionRequest(),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "selected", optionId: "deny" } })
+    expect(asked[0]?.ruleset).toEqual(ruleset)
+  })
+
+  it("uses specific unknown ACP tool names so OpenCode rules can deny them", async () => {
+    const ruleset: PermissionV1.Ruleset = [{ permission: "mcp__server__tool", pattern: "*", action: "deny" }]
+    const asked: PermissionV1.AskInput[] = []
+
+    const result = await requestPermissionForActive(
+      activePermission({
+        ruleset,
+        ask: askByRuleset(asked),
+      }),
+      unknownToolPermissionRequest(),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "selected", optionId: "deny" } })
+    expect(asked[0]?.permission).toBe("mcp__server__tool")
+    expect(asked[0]?.patterns).toEqual(["mcp__server__tool"])
+  })
+
+  it("preserves explicit ask rules from the active OpenCode ruleset", async () => {
+    const ruleset: PermissionV1.Ruleset = [
+      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "bash", pattern: "printf hello", action: "ask" },
+    ]
+    const asked: PermissionV1.AskInput[] = []
+
+    const result = await requestPermissionForActive(
+      activePermission({
+        ruleset,
+        ask: askByRuleset(asked),
+      }),
+      permissionRequest(),
+    )
+
+    expect(result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } })
+    expect(asked[0]?.ruleset).toEqual(ruleset)
   })
 
   it("cancels ACP permission requests when the OpenCode bridge fails before user selection", async () => {
@@ -183,6 +340,7 @@ describe("Claude ACP permissions", () => {
       {
         sessionID: SessionID.make("ses_test"),
         abort: abort.signal,
+        ruleset: [],
         permission: {
           ask: async () => {
             throw new PermissionV1.NotFoundError({ requestID: PermissionV1.ID.make("per_missing") })
@@ -203,6 +361,7 @@ describe("Claude ACP permissions", () => {
       {
         sessionID: SessionID.make("ses_test"),
         abort: abort.signal,
+        ruleset: [],
         permission: {
           ask: async () => {
             throw new PermissionV1.RejectedError()
@@ -224,6 +383,7 @@ describe("Claude ACP permissions", () => {
       {
         sessionID: SessionID.make("ses_test"),
         abort: abort.signal,
+        ruleset: [],
         permission: {
           ask: async (input) => {
             replies.push(input)
@@ -248,9 +408,159 @@ describe("Claude ACP filesystem", () => {
       "C:\\Users\\matt\\acp-permission-test.txt",
     )
   })
+
+  it("builds direct read permission checks with external directory guardrails", () => {
+    expect(
+      claudeACPDirectPermissionChecks({
+        kind: "read",
+        cwd: "C:/Users/matt/Projects/opencode",
+        path: "C:/Users/matt/outside/secret.txt",
+      }),
+    ).toEqual([
+      {
+        permission: "external_directory",
+        patterns: ["C:\\Users\\matt\\outside\\*"],
+        always: ["C:\\Users\\matt\\outside\\*"],
+        metadata: {
+          filepath: "C:\\Users\\matt\\outside\\secret.txt",
+          parentDir: "C:\\Users\\matt\\outside",
+        },
+      },
+      {
+        permission: "read",
+        patterns: ["C:\\Users\\matt\\outside\\secret.txt"],
+        always: ["*"],
+        metadata: {
+          filepath: "C:\\Users\\matt\\outside\\secret.txt",
+        },
+      },
+    ])
+  })
+
+  it("builds direct write permission checks before file mutation", () => {
+    expect(
+      claudeACPDirectPermissionChecks({
+        kind: "write",
+        cwd: "C:/Users/matt/Projects/opencode",
+        path: "src/new-file.ts",
+      }),
+    ).toEqual([
+      {
+        permission: "edit",
+        patterns: ["src\\new-file.ts"],
+        always: ["*"],
+        metadata: {
+          filepath: "C:\\Users\\matt\\Projects\\opencode\\src\\new-file.ts",
+        },
+      },
+    ])
+  })
+
+  it("builds direct terminal permission checks with cwd guardrails", () => {
+    expect(
+      claudeACPDirectPermissionChecks({
+        kind: "terminal",
+        cwd: "C:/Users/matt/Projects/opencode",
+        command: "node",
+        args: ["script.js"],
+        terminalCwd: "C:/Users/matt/outside",
+      }),
+    ).toEqual([
+      {
+        permission: "external_directory",
+        patterns: ["C:\\Users\\matt\\outside\\*"],
+        always: ["C:\\Users\\matt\\outside\\*"],
+        metadata: {
+          filepath: "C:\\Users\\matt\\outside",
+          parentDir: "C:\\Users\\matt\\outside",
+        },
+      },
+      {
+        permission: "bash",
+        patterns: ["node script.js"],
+        always: ["node *"],
+        metadata: {
+          command: "node script.js",
+          cwd: "C:\\Users\\matt\\outside",
+        },
+      },
+    ])
+  })
+
+  it("builds direct terminal permission checks for external path arguments", () => {
+    expect(
+      claudeACPDirectPermissionChecks({
+        kind: "terminal",
+        cwd: "C:/Users/matt/Projects/opencode",
+        command: "node",
+        args: ["script.js", "C:/Users/matt/outside/secret.txt"],
+      }),
+    ).toEqual([
+      {
+        permission: "external_directory",
+        patterns: ["C:\\Users\\matt\\outside\\*"],
+        always: ["C:\\Users\\matt\\outside\\*"],
+        metadata: {
+          filepath: "C:\\Users\\matt\\outside\\secret.txt",
+          parentDir: "C:\\Users\\matt\\outside",
+        },
+      },
+      {
+        permission: "bash",
+        patterns: ["node script.js C:/Users/matt/outside/secret.txt"],
+        always: ["node *"],
+        metadata: {
+          command: "node script.js C:/Users/matt/outside/secret.txt",
+          cwd: "C:\\Users\\matt\\Projects\\opencode",
+        },
+      },
+    ])
+  })
 })
 
-function permissionRequest() {
+describe("Claude ACP terminal output", () => {
+  it("clamps output byte limits to a finite range", () => {
+    expect(claudeACPTerminalOutputLimit(undefined)).toBe(128_000)
+    expect(claudeACPTerminalOutputLimit(Number.NaN)).toBe(128_000)
+    expect(claudeACPTerminalOutputLimit(-1)).toBe(0)
+    expect(claudeACPTerminalOutputLimit(1_500_000)).toBe(1_000_000)
+  })
+
+  it("truncates terminal output by bytes without splitting characters", () => {
+    const output = ["aé"]
+
+    expect(claudeACPAppendOutput(output, "b", 2)).toBe(true)
+    expect(output.join("")).toBe("b")
+    expect(Buffer.byteLength(output.join(""), "utf8")).toBeLessThanOrEqual(2)
+  })
+})
+
+function activePermission(input: {
+  readonly ruleset?: PermissionV1.Ruleset
+  readonly ask: (request: PermissionV1.AskInput) => Promise<PermissionV1.Reply>
+}) {
+  const abort = new AbortController()
+  return {
+    sessionID: SessionID.make("ses_test"),
+    abort: abort.signal,
+    ruleset: input.ruleset ?? [],
+    permission: {
+      ask: input.ask,
+      reply: async () => {},
+    },
+  }
+}
+
+function askByRuleset(asked: PermissionV1.AskInput[]) {
+  return async (input: PermissionV1.AskInput): Promise<PermissionV1.Reply> => {
+    asked.push(input)
+    const rules = input.patterns.map((pattern) => Permission.evaluate(input.permission, pattern, input.ruleset))
+    if (rules.some((rule) => rule.action === "deny")) throw new PermissionV1.DeniedError({ ruleset: input.ruleset })
+    return "once"
+  }
+}
+
+function permissionRequest(options?: RequestPermissionRequest["options"]) {
   return {
     sessionId: "claude_session",
     toolCall: {
@@ -258,6 +568,22 @@ function permissionRequest() {
       kind: "execute",
       title: "printf hello",
       rawInput: { command: "printf hello" },
+    },
+    options: options ?? [
+      { optionId: "allow", kind: "allow_once", name: "Allow" },
+      { optionId: "deny", kind: "reject_once", name: "Deny" },
+    ],
+  } satisfies RequestPermissionRequest
+}
+
+function unknownToolPermissionRequest() {
+  return {
+    sessionId: "claude_session",
+    toolCall: {
+      toolCallId: "call_mcp",
+      kind: "other",
+      title: "Call MCP tool",
+      rawInput: { name: "mcp__server__tool" },
     },
     options: [
       { optionId: "allow", kind: "allow_once", name: "Allow" },
@@ -288,4 +614,18 @@ function editPermissionRequestWithIncompleteDiff() {
       { optionId: "deny", kind: "reject_once", name: "Deny" },
     ],
   } satisfies RequestPermissionRequest
+}
+
+function toolUpdate(
+  input: Partial<Extract<SessionNotification["update"], { sessionUpdate: "tool_call" | "tool_call_update" }>> & {
+    sessionUpdate: "tool_call" | "tool_call_update"
+  },
+) {
+  return {
+    toolCallId: "call_read",
+    title: "Read README.md",
+    kind: "read",
+    rawInput: { filePath: "README.md" },
+    ...input,
+  } as Extract<SessionNotification["update"], { sessionUpdate: "tool_call" | "tool_call_update" }>
 }

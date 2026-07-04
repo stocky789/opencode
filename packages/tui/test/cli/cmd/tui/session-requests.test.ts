@@ -28,6 +28,53 @@ describe("session request visibility", () => {
     ).toEqual(["perm_child"])
   })
 
+  test("shows requests for the child route itself", () => {
+    expect(
+      visibleSessionRequests({
+        routeSessionID: "ses_child",
+        currentSession: { id: "ses_child", parentID: "ses_parent" },
+        sessions: [{ id: "ses_parent" }, { id: "ses_child", parentID: "ses_parent" }],
+        requests: {
+          ses_child: [{ id: "perm_child" }],
+        },
+      }).map((item) => item.id),
+    ).toEqual(["perm_child"])
+  })
+
+  test("shows nested child session requests from the parent route", () => {
+    expect(
+      visibleSessionRequests({
+        routeSessionID: "ses_parent",
+        currentSession: { id: "ses_parent" },
+        sessions: [
+          { id: "ses_parent" },
+          { id: "ses_child", parentID: "ses_parent" },
+          { id: "ses_grandchild", parentID: "ses_child" },
+        ],
+        requests: {
+          ses_grandchild: [{ id: "perm_grandchild" }],
+        },
+      }).map((item) => item.id),
+    ).toEqual(["perm_grandchild"])
+  })
+
+  test("shows nested child session requests from a child route", () => {
+    expect(
+      visibleSessionRequests({
+        routeSessionID: "ses_child",
+        currentSession: { id: "ses_child", parentID: "ses_parent" },
+        sessions: [
+          { id: "ses_parent" },
+          { id: "ses_child", parentID: "ses_parent" },
+          { id: "ses_grandchild", parentID: "ses_child" },
+        ],
+        requests: {
+          ses_grandchild: [{ id: "perm_grandchild" }],
+        },
+      }).map((item) => item.id),
+    ).toEqual(["perm_grandchild"])
+  })
+
   test("does not show parent requests from a child route", () => {
     expect(
       visibleSessionRequests({

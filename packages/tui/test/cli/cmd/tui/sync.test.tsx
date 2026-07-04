@@ -167,4 +167,95 @@ describe("tui sync", () => {
       app.renderer.destroy()
     }
   })
+
+  test("deduplicates live permission requests also present in bootstrap list", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let resolvePermission!: (response: Response) => void
+    const permissionList = new Promise<Response>((resolve) => {
+      resolvePermission = resolve
+    })
+    const request = {
+      id: "perm_live",
+      sessionID: "ses_live",
+      permission: "edit",
+      patterns: ["C:/Users/matt/permission-test.txt"],
+      metadata: { filepath: "C:/Users/matt/permission-test.txt" },
+      always: ["C:/Users/matt/permission-test.txt"],
+    }
+    const { app, emit, sync } = await mount(
+      (url) => {
+        if (url.pathname === "/permission") return permissionList
+        if (url.pathname === "/question") return json([])
+        return undefined
+      },
+      tmp.path,
+      { waitForComplete: false },
+    )
+
+    try {
+      await Bun.sleep(0)
+      emit(
+        globalEvent({
+          id: "evt_perm_live",
+          type: "permission.asked",
+          properties: request,
+        }),
+      )
+      await wait(() => sync.data.permission.ses_live?.length === 1)
+
+      resolvePermission(json([request]))
+      await wait(() => sync.status === "complete")
+
+      expect(sync.data.permission.ses_live.map((item) => item.id)).toEqual(["perm_live"])
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("drops pre-existing permission requests missing from bootstrap list", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let permissionLists = 0
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/permission") {
+        permissionLists++
+        return json([])
+      }
+      if (url.pathname === "/question") return json([])
+      return undefined
+    }, tmp.path)
+
+    try {
+      emit(
+        globalEvent({
+          id: "evt_perm_stale",
+          type: "permission.asked",
+          properties: {
+            id: "perm_stale",
+            sessionID: "ses_stale",
+            permission: "edit",
+            patterns: ["C:/Users/matt/permission-test.txt"],
+            metadata: { filepath: "C:/Users/matt/permission-test.txt" },
+            always: ["C:/Users/matt/permission-test.txt"],
+          },
+        }),
+      )
+      await wait(() => sync.data.permission.ses_stale?.length === 1)
+
+      const beforeReconnect = permissionLists
+      emit(
+        globalEvent({
+          id: "evt_reconnect",
+          type: "server.instance.disposed",
+          properties: { directory: "/tmp/other" },
+        }),
+      )
+      await wait(() => permissionLists > beforeReconnect)
+
+      expect(sync.data.permission.ses_stale ?? []).toEqual([])
+    } finally {
+      app.renderer.destroy()
+    }
+  })
 })

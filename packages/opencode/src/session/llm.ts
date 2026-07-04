@@ -38,6 +38,7 @@ import { LLMRequestPrep } from "./llm/request"
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
 export type StreamInput = {
+  cwd?: string
   user: SessionV1.User
   sessionID: SessionID
   parentSessionID?: string
@@ -72,7 +73,8 @@ export function claudeACPPromptBridge(input: {
 }) {
   return {
     permission: {
-      ask: (request: PermissionV1.AskInput) => input.bridge.promise(input.permission.askWithReply(request)),
+      ask: (request: PermissionV1.AskInput) =>
+        input.bridge.promise(input.permission.askWithReply(request), { signal: input.abort }),
       reply: (request: PermissionV1.ReplyInput) => input.bridge.promise(input.permission.reply(request)),
     },
     question: {
@@ -118,6 +120,19 @@ const live: Layer.Layer<
       })
 
       if (input.model.providerID === ClaudeACPProviderID) {
+        const unsupported = claudeACPUnsupported(input)
+        if (unsupported) {
+          return {
+            type: "native" as const,
+            stream: Stream.fail(new Error(unsupported)),
+          }
+        }
+        if (!input.cwd) {
+          return {
+            type: "native" as const,
+            stream: Stream.fail(new Error("Claude ACP requires a session cwd")),
+          }
+        }
         const cfg = yield* config.get()
         const bridge = yield* EffectBridge.make()
         const prompts = claudeACPPromptBridge({ bridge, abort: input.abort, permission: perm, question })
@@ -129,13 +144,15 @@ const live: Layer.Layer<
         return {
           type: "native" as const,
           stream: ClaudeACP.stream({
-            cwd: process.cwd(),
+            cwd: input.cwd,
             sessionID: input.sessionID,
             modelID: input.model.id,
             agent: input.agent.name,
             mcpServers: claudeMcpServers(cfg),
-            messages: input.messages,
+            messages: claudeACPMessages(input.system, input.messages),
             abort: input.abort,
+            // Claude ACP owns tool execution through Claude Code plus MCP servers;
+            // OpenCode AI SDK tools are intentionally not forwarded here.
             ruleset: Permission.merge(input.agent.permission, input.permission ?? []),
             permission: prompts.permission,
             question: prompts.question,
@@ -436,6 +453,18 @@ const live: Layer.Layer<
 )
 
 export const hasToolCalls = LLMRequestPrep.hasToolCalls
+
+function claudeACPUnsupported(input: StreamRequest) {
+  if (input.toolChoice && input.toolChoice !== "auto") {
+    return `Claude ACP does not support toolChoice "${input.toolChoice}"`
+  }
+}
+
+function claudeACPMessages(system: string[], messages: ModelMessage[]) {
+  const text = system.map((item) => item.trim()).filter(Boolean).join("\n\n")
+  if (!text) return messages
+  return [{ role: "system" as const, content: text }, ...messages]
+}
 
 function claudeMcpServers(config: ConfigV1.Info): McpServer[] {
   return Object.entries(config.mcp ?? {}).flatMap<McpServer>(([name, server]) => {

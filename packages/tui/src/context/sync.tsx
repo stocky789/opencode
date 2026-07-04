@@ -58,19 +58,26 @@ function groupedRequests<T extends { id: string; sessionID: string }>(items: T[]
   }, {})
 }
 
+function requestIDs<T extends { id: string }>(items: Record<string, T[]>) {
+  return new Set(Object.values(items).flatMap((group) => group.map((item) => item.id)))
+}
+
 function mergeGroupedRequests<T extends { id: string; sessionID: string }>(
   current: Record<string, T[]>,
   incoming: T[],
   settled: Set<string>,
+  preexisting: Set<string>,
 ) {
+  const incomingRequests = new Map(
+    incoming.filter((item) => !settled.has(item.id)).map((item) => [item.id, item] as const),
+  )
   return groupedRequests(
-    Array.from(
-      new Map(
-        [...Object.values(current).flat(), ...incoming]
-          .filter((item) => !settled.has(item.id))
-          .map((item) => [item.id, item]),
-      ).values(),
-    ),
+    [
+      ...incomingRequests.values(),
+      ...Object.values(current)
+        .flat()
+        .filter((item) => !settled.has(item.id) && !preexisting.has(item.id) && !incomingRequests.has(item.id)),
+    ],
   )
 }
 
@@ -550,22 +557,28 @@ export const {
               .list({ workspace })
               .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-            sdk.client.permission
-              .list({ workspace })
-              .then((x) =>
-                setStore(
-                  "permission",
-                  reconcile(mergeGroupedRequests(store.permission, x.data ?? [], settledPermissions)),
-                ),
-              ),
-            sdk.client.question
-              .list({ workspace })
-              .then((x) =>
-                setStore(
-                  "question",
-                  reconcile(mergeGroupedRequests(store.question, x.data ?? [], settledQuestions)),
-                ),
-              ),
+            (() => {
+              const preexisting = requestIDs(store.permission)
+              return sdk.client.permission
+                .list({ workspace })
+                .then((x) =>
+                  setStore(
+                    "permission",
+                    reconcile(mergeGroupedRequests(store.permission, x.data ?? [], settledPermissions, preexisting)),
+                  ),
+                )
+            })(),
+            (() => {
+              const preexisting = requestIDs(store.question)
+              return sdk.client.question
+                .list({ workspace })
+                .then((x) =>
+                  setStore(
+                    "question",
+                    reconcile(mergeGroupedRequests(store.question, x.data ?? [], settledQuestions, preexisting)),
+                  ),
+                )
+            })(),
             sdk.client.session.status({ workspace }).then((x) => {
               setStore("session_status", reconcile(x.data ?? {}))
             }),

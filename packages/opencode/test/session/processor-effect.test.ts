@@ -251,6 +251,23 @@ const interruptedEnv = LayerNode.compile(root, [
 ])
 const itInterrupted = testEffect(interruptedEnv)
 
+let capturedProcessorInput: (LLM.StreamInput & { cwd?: string }) | undefined
+const captureInputLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: (input) => {
+      capturedProcessorInput = input
+      return Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      )
+    },
+  }),
+)
+const captureInputEnv = LayerNode.compile(root, [...replacements, [LLM.node, captureInputLLM]])
+const itCaptureInput = testEffect(captureInputEnv)
+
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
@@ -307,6 +324,50 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
       }),
     { config: (url) => providerCfg(url) },
+  ),
+)
+
+itCaptureInput.live("session.processor effect tests forward assistant cwd to llm input", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        capturedProcessorInput = undefined
+        const { processors, session, provider } = yield* boot()
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "cwd")
+        const sessionCwd = path.join(path.resolve(dir), "session-cwd")
+        const msg = yield* assistant(chat.id, parent.id, sessionCwd)
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "cwd" }],
+          tools: {},
+        })
+
+        expect(value).toBe("continue")
+        const captured = capturedProcessorInput as (LLM.StreamInput & { cwd?: string }) | undefined
+        expect(captured?.cwd).toBe(sessionCwd)
+        expect(captured?.cwd).not.toBe(process.cwd())
+      }),
+    { config: cfg },
   ),
 )
 
