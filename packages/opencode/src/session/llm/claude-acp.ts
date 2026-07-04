@@ -23,12 +23,15 @@ import type {
   SessionNotification,
   TerminalOutputRequest,
   TerminalOutputResponse,
+  ToolCall,
+  ToolCallContent,
+  ToolCallUpdate,
   WaitForTerminalExitRequest,
   WaitForTerminalExitResponse,
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk"
-import { LLMEvent, Usage, type FinishReason, type LLMEvent as LLMEventType } from "@opencode-ai/llm"
+import { LLMEvent, ToolResultValue, Usage, type FinishReason, type LLMEvent as LLMEventType } from "@opencode-ai/llm"
 import { Question } from "@/question"
 import type { ModelMessage } from "ai"
 import { createTwoFilesPatch } from "diff"
@@ -60,8 +63,19 @@ type Terminal = {
   readonly process: Bun.Subprocess<"ignore", "pipe", "pipe">
   readonly output: string[]
   readonly limit: number
+  truncated: boolean
   readonly exited: Promise<WaitForTerminalExitResponse>
   exitStatus?: WaitForTerminalExitResponse
+}
+
+type ACPToolState = {
+  name: string
+  title: string
+  input: unknown
+  content?: ToolCallContent[] | null
+  rawOutput?: unknown
+  status?: ToolCall["status"] | null
+  started: boolean
 }
 
 type QueueItem =
@@ -112,6 +126,7 @@ type Connection = {
     readonly ruleset: PermissionV1.Ruleset
     readonly permission: PermissionBridge
     readonly question: QuestionBridge
+    readonly tools: Map<string, ACPToolState>
     contextUsage?: ACPContextUsage
     providerCompacted?: boolean
   }
@@ -121,12 +136,35 @@ type Connection = {
 type ActivePermissionRequest = {
   readonly sessionID: PermissionV1.AskInput["sessionID"]
   readonly abort: AbortSignal
+  readonly ruleset: PermissionV1.Ruleset
   readonly permission: PermissionBridge
 }
+
+type ActiveDirectRequest = ActivePermissionRequest & {
+  readonly cwd: string
+}
+
+type DirectPermissionCheck = Pick<PermissionV1.AskInput, "permission" | "patterns" | "always" | "metadata">
+
+type DirectPermissionInput =
+  | {
+      readonly kind: "read" | "write"
+      readonly cwd: string
+      readonly path: string
+    }
+  | {
+      readonly kind: "terminal"
+      readonly cwd: string
+      readonly command: string
+      readonly args?: readonly string[] | null
+      readonly terminalCwd?: string | null
+    }
 
 const TEXT_ID = "claude-acp-text"
 const REASONING_ID = "claude-acp-reasoning"
 const IDLE_CLOSE_MS = 10 * 60_000
+const TERMINAL_OUTPUT_DEFAULT = 128_000
+const TERMINAL_OUTPUT_MAX = 1_000_000
 const connections = new Map<string, Promise<Connection>>()
 const activeConnections = new Set<Connection>()
 
@@ -173,6 +211,7 @@ async function* run(input: StreamInput) {
           ruleset: input.ruleset,
           permission: input.permission,
           question: input.question,
+          tools: new Map(),
         }
         try {
           const response = await activeConnection.client.prompt({
@@ -250,7 +289,7 @@ async function* run(input: StreamInput) {
 }
 
 async function getConnection(input: StreamInput) {
-  const key = connectionKey(input)
+  const key = claudeACPConnectionKey(input)
   const existing = connections.get(key)
   if (existing) {
     const connection = await existing
@@ -339,8 +378,17 @@ async function withConnectionLock<T>(connection: Connection, fn: () => Promise<T
   }
 }
 
-function connectionKey(input: StreamInput) {
-  return [input.sessionID, input.cwd, input.modelID, stableStringify(input.mcpServers)].join("\0")
+export function claudeACPConnectionKey(
+  input: Pick<StreamInput, "sessionID" | "cwd" | "modelID" | "agent" | "mcpServers" | "messages">,
+) {
+  return [
+    input.sessionID,
+    input.cwd,
+    input.modelID,
+    input.agent,
+    stableStringify(input.mcpServers),
+    stableStringify(input.messages.filter((message) => message.role === "system").map((message) => contentText(message.content))),
+  ].join("\0")
 }
 
 function scheduleDispose(connection: Connection) {
@@ -404,8 +452,8 @@ function makeClient(connection: Connection): Client {
     sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection, params),
     requestPermission: (params) => requestPermission(connection, params),
     unstable_createElicitation: (params) => createElicitation(connection, params),
-    readTextFile: (params) => readTextFile(connection.active?.cwd ?? connection.cwd, params),
-    writeTextFile: (params) => writeTextFile(connection.active?.cwd ?? connection.cwd, params),
+    readTextFile: (params) => readTextFile(connection.active, connection.cwd, params),
+    writeTextFile: (params) => writeTextFile(connection.active, connection.cwd, params),
     createTerminal: (params) => createTerminal(connection, params),
     terminalOutput: (params) => terminalOutput(connection.terminals, params),
     waitForTerminalExit: (params) => waitForTerminalExit(connection.terminals, params),
@@ -434,6 +482,161 @@ function sessionUpdate(connection: Connection, params: SessionNotification) {
   }
   if (params.update.sessionUpdate === "agent_thought_chunk" && params.update.content.type === "text") {
     active.queue.reasoning(params.update.content.text)
+    return
+  }
+  if (params.update.sessionUpdate === "tool_call" || params.update.sessionUpdate === "tool_call_update") {
+    const events = claudeACPToolEvents(active.tools, params.update)
+    if (events.length === 0) return
+    active.queue.closeBlocks()
+    for (const event of events) active.queue.push(event)
+  }
+}
+
+export function claudeACPToolEvents(
+  state: Map<string, ACPToolState>,
+  update: Extract<SessionNotification["update"], { sessionUpdate: "tool_call" | "tool_call_update" }>,
+) {
+  const previous = state.get(update.toolCallId)
+  const tool = {
+    name: claudeACPToolName(update, previous?.name),
+    title: update.title ?? previous?.title ?? update.toolCallId,
+    input: "rawInput" in update && update.rawInput !== undefined ? update.rawInput : (previous?.input ?? {}),
+    content: update.content ?? previous?.content,
+    rawOutput: "rawOutput" in update && update.rawOutput !== undefined ? update.rawOutput : previous?.rawOutput,
+    status: update.status ?? previous?.status,
+    started: previous?.started ?? false,
+  } satisfies ACPToolState
+  state.set(update.toolCallId, tool)
+
+  const events: LLMEventType[] = []
+  if (!tool.started) {
+    tool.started = true
+    events.push(
+      LLMEvent.toolCall({
+        id: update.toolCallId,
+        name: tool.name,
+        input: tool.input,
+        providerExecuted: true,
+        providerMetadata: claudeACPToolMetadata(tool, update),
+      }),
+    )
+  }
+
+  if (tool.status === "completed") {
+    events.push(
+      LLMEvent.toolResult({
+        id: update.toolCallId,
+        name: tool.name,
+        result: ToolResultValue.make({
+          title: tool.title,
+          output: claudeACPToolOutput(tool),
+          metadata: claudeACPToolResultMetadata(tool, update),
+        }),
+        providerExecuted: true,
+        providerMetadata: claudeACPToolMetadata(tool, update),
+      }),
+    )
+    state.delete(update.toolCallId)
+  }
+
+  if (tool.status === "failed") {
+    events.push(
+      LLMEvent.toolError({
+        id: update.toolCallId,
+        name: tool.name,
+        message: claudeACPToolOutput(tool),
+        error: tool.rawOutput,
+        providerMetadata: claudeACPToolMetadata(tool, update),
+      }),
+    )
+    state.delete(update.toolCallId)
+  }
+
+  return events
+}
+
+function claudeACPToolName(tool: Partial<Pick<ToolCall | ToolCallUpdate, "kind" | "rawInput" | "title">>, fallback?: string) {
+  switch (tool.kind) {
+    case "execute":
+      return "bash"
+    case "edit":
+    case "delete":
+    case "move":
+      return "edit"
+    case "fetch":
+      return "webfetch"
+    case "search":
+      return "grep"
+    case "read":
+      return "read"
+  }
+
+  const input = recordValue(tool.rawInput)
+  return (
+    stringValue(input.tool) ??
+    stringValue(input.toolName) ??
+    stringValue(input.name) ??
+    stringValue(input.command) ??
+    fallback ??
+    tool.kind ??
+    tool.title ??
+    "claude_tool"
+  )
+}
+
+function claudeACPToolMetadata(
+  tool: ACPToolState,
+  update: Extract<SessionNotification["update"], { sessionUpdate: "tool_call" | "tool_call_update" }>,
+) {
+  return {
+    anthropic: {
+      acpTool: {
+        id: update.toolCallId,
+        name: tool.name,
+        title: tool.title,
+        status: tool.status,
+        kind: update.kind,
+      },
+    },
+  }
+}
+
+function claudeACPToolResultMetadata(
+  tool: ACPToolState,
+  update: Extract<SessionNotification["update"], { sessionUpdate: "tool_call" | "tool_call_update" }>,
+) {
+  return {
+    acp: {
+      status: tool.status,
+      kind: update.kind,
+      rawOutput: tool.rawOutput,
+    },
+  }
+}
+
+function claudeACPToolOutput(tool: ACPToolState) {
+  if (typeof tool.rawOutput === "string") return tool.rawOutput
+  const output = recordValue(tool.rawOutput).output
+  if (typeof output === "string") return output
+  if (tool.rawOutput !== undefined) return stringifyToolValue(tool.rawOutput)
+  const content = (tool.content ?? []).map(toolContentText).filter(Boolean).join("\n")
+  return content || tool.title
+}
+
+function toolContentText(content: ToolCallContent) {
+  if (content.type === "diff") return `Updated ${content.path}`
+  if (content.type === "terminal") return `Terminal ${content.terminalId}`
+  if (content.content.type === "text") return content.content.text
+  if (content.content.type === "image") return "[image]"
+  return stringifyToolValue(content.content)
+}
+
+function stringifyToolValue(value: unknown) {
+  if (typeof value === "string") return value
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return String(value)
   }
 }
 
@@ -467,7 +670,7 @@ export async function requestPermissionForActive(
       patterns,
       always: permissionAlways(permission, patterns),
       metadata,
-      ruleset: claudeACPPermissionRuleset(permission, patterns),
+      ruleset: active.ruleset,
     })
     return allowPermission(params, reply)
   } catch (error) {
@@ -486,27 +689,13 @@ export async function requestPermissionForActive(
 }
 
 function permissionName(params: RequestPermissionRequest) {
-  switch (params.toolCall.kind) {
-    case "execute":
-      return "bash"
-    case "edit":
-    case "delete":
-    case "move":
-      return "edit"
-    case "fetch":
-      return "webfetch"
-    case "search":
-      return "grep"
-    case "read":
-      return "read"
-    default:
-      return params.toolCall.kind ? `claude_${params.toolCall.kind}` : "claude_tool"
-  }
+  return claudeACPToolName(params.toolCall)
 }
 
 function permissionMetadata(params: RequestPermissionRequest): Record<string, unknown> {
   const metadata = { ...recordValue(params.toolCall.rawInput) }
   metadata.toolCallId = params.toolCall.toolCallId
+  metadata.toolName = claudeACPToolName(params.toolCall)
   metadata.kind = params.toolCall.kind ?? "other"
   metadata.title = params.toolCall.title ?? params.toolCall.toolCallId
 
@@ -553,7 +742,7 @@ function permissionPatterns(
   const file = firstString(metadata.filePath, metadata.filepath, metadata.path)
   if ((permission === "read" || permission === "edit") && file) return [file]
   if (locations.length > 0) return locations
-  return ["*"]
+  return [stringValue(metadata.toolName) ?? params.toolCall.title ?? "*"]
 }
 
 function permissionAlways(permission: string, patterns: string[]) {
@@ -561,15 +750,9 @@ function permissionAlways(permission: string, patterns: string[]) {
   return ["*"]
 }
 
-export function claudeACPPermissionRuleset(permission: string, patterns: string[]) {
-  return patterns.map((pattern) => ({ permission, pattern, action: "ask" as const })) satisfies PermissionV1.Ruleset
-}
-
 function allowPermission(params: RequestPermissionRequest, reply: PermissionV1.Reply): RequestPermissionResponse {
-  const preferred = reply === "always" ? "allow_always" : "allow_once"
-  const option =
-    params.options.find((item) => item.kind === preferred) ??
-    params.options.find((item) => item.kind === "allow_once" || item.kind === "allow_always")
+  void reply
+  const option = params.options.find((item) => item.kind === "allow_once")
   if (!option) return cancelledPermission()
   return { outcome: { outcome: "selected", optionId: option.optionId } }
 }
@@ -715,29 +898,211 @@ function shortHeader(value: string) {
   return value.length <= 30 ? value : value.slice(0, 30)
 }
 
-async function readTextFile(cwd: string, params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
-  const content = await Bun.file(resolveACPPath(cwd, params.path)).text()
+export function claudeACPDirectPermissionChecks(input: DirectPermissionInput): DirectPermissionCheck[] {
+  if (input.kind === "terminal") {
+    const cwd = input.terminalCwd ? resolveACPPath(input.cwd, input.terminalCwd) : path.resolve(input.cwd)
+    const command = [input.command, ...(input.args ?? [])].join(" ")
+    return uniqueDirectPermissionChecks([
+      ...externalDirectoryPermission(input.cwd, cwd, "directory"),
+      ...terminalArgumentExternalPermissions(input.cwd, cwd, input.args),
+      {
+        permission: "bash",
+        patterns: [command],
+        always: [`${input.command} *`],
+        metadata: {
+          command,
+          cwd,
+        },
+      },
+    ])
+  }
+
+  const target = resolveACPPath(input.cwd, input.path)
+  return [
+    ...externalDirectoryPermission(input.cwd, target, "file"),
+    {
+      permission: input.kind === "read" ? "read" : "edit",
+      patterns: [permissionPathPattern(input.cwd, target)],
+      always: ["*"],
+      metadata: {
+        filepath: target,
+      },
+    },
+  ]
+}
+
+function uniqueDirectPermissionChecks(checks: DirectPermissionCheck[]) {
+  const seen = new Set<string>()
+  return checks.filter((check) => {
+    const key = `${check.permission}\0${check.patterns.join("\0")}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function terminalArgumentExternalPermissions(
+  projectCwd: string,
+  terminalCwd: string,
+  args: readonly string[] | null | undefined,
+) {
+  return (args ?? []).flatMap((arg) => {
+    const target = terminalArgumentPath(terminalCwd, arg)
+    return target ? externalDirectoryPermission(projectCwd, target, "file") : []
+  })
+}
+
+function terminalArgumentPath(cwd: string, value: string) {
+  const candidate = terminalArgumentPathCandidate(value)
+  if (!candidate) return
+  return resolveACPPath(cwd, candidate)
+}
+
+function terminalArgumentPathCandidate(value: string) {
+  const text = unquote(value.trim())
+  if (!text || text === "." || /^\/[A-Za-z]$/i.test(text)) return
+  const assigned = text.includes("=") ? text.slice(text.indexOf("=") + 1) : text
+  const candidate = unquote(assigned)
+  if (
+    path.isAbsolute(candidate) ||
+    candidate.startsWith("../") ||
+    candidate.startsWith("..\\") ||
+    candidate.startsWith("./") ||
+    candidate.startsWith(".\\") ||
+    candidate.includes("/") ||
+    candidate.includes("\\")
+  ) {
+    return candidate
+  }
+}
+
+function unquote(value: string) {
+  if (value.length < 2) return value
+  const first = value[0]
+  const last = value[value.length - 1]
+  if ((first === `"` || first === "'") && first === last) return value.slice(1, -1)
+  return value
+}
+
+async function assertACPDirectPermissions(
+  active: ActivePermissionRequest | undefined,
+  checks: ReadonlyArray<DirectPermissionCheck>,
+) {
+  if (!active || active.abort.aborted) throw RequestError.invalidParams({}, "permission unavailable")
+
+  for (const check of checks) {
+    const requestID = PermissionV1.ID.ascending()
+    const onAbort = () => {
+      void active.permission.reply({ requestID, reply: "reject" }).catch(() => undefined)
+    }
+    active.abort.addEventListener("abort", onAbort, { once: true })
+    try {
+      await active.permission.ask({
+        id: requestID,
+        sessionID: active.sessionID,
+        ...check,
+        ruleset: active.ruleset,
+      })
+    } catch (error) {
+      if (active.abort.aborted) throw RequestError.invalidParams({}, "permission cancelled")
+      if (
+        error instanceof PermissionV1.DeniedError ||
+        error instanceof PermissionV1.RejectedError ||
+        error instanceof PermissionV1.CorrectedError
+      ) {
+        throw RequestError.invalidParams(
+          { permission: check.permission, patterns: check.patterns },
+          "permission denied",
+        )
+      }
+      throw RequestError.internalError({ permission: check.permission }, errorMessage(error))
+    } finally {
+      active.abort.removeEventListener("abort", onAbort)
+    }
+  }
+}
+
+function externalDirectoryPermission(cwd: string, target: string, kind: "file" | "directory"): DirectPermissionCheck[] {
+  if (containsACPPath(cwd, target)) return []
+  const dir = kind === "directory" ? target : path.dirname(target)
+  const pattern = path.join(dir, "*")
+  return [
+    {
+      permission: "external_directory",
+      patterns: [pattern],
+      always: [pattern],
+      metadata: {
+        filepath: target,
+        parentDir: dir,
+      },
+    },
+  ]
+}
+
+function permissionPathPattern(cwd: string, target: string) {
+  if (!containsACPPath(cwd, target)) return target
+  return path.relative(path.resolve(cwd), target) || "."
+}
+
+function containsACPPath(cwd: string, target: string) {
+  const relative = path.relative(path.resolve(cwd), target)
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+}
+
+async function readTextFile(
+  active: ActiveDirectRequest | undefined,
+  cwd: string,
+  params: ReadTextFileRequest,
+): Promise<ReadTextFileResponse> {
+  const base = active?.cwd ?? cwd
+  const target = resolveACPPath(base, params.path)
+  await assertACPDirectPermissions(
+    active,
+    claudeACPDirectPermissionChecks({ kind: "read", cwd: base, path: params.path }),
+  )
+  const content = await Bun.file(target).text()
   if (!params.line && !params.limit) return { content }
   const start = (params.line ?? 1) - 1
   return { content: content.split(/\r?\n/).slice(start, params.limit ? start + params.limit : undefined).join("\n") }
 }
 
-async function writeTextFile(cwd: string, params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
-  const target = resolveACPPath(cwd, params.path)
+async function writeTextFile(
+  active: ActiveDirectRequest | undefined,
+  cwd: string,
+  params: WriteTextFileRequest,
+): Promise<WriteTextFileResponse> {
+  const base = active?.cwd ?? cwd
+  const target = resolveACPPath(base, params.path)
+  await assertACPDirectPermissions(
+    active,
+    claudeACPDirectPermissionChecks({ kind: "write", cwd: base, path: params.path }),
+  )
   await mkdir(path.dirname(target), { recursive: true })
   await Bun.write(target, params.content)
   return {}
 }
 
 async function createTerminal(
-  input: { readonly cwd: string; readonly terminals: Map<string, Terminal> },
+  input: Connection,
   params: CreateTerminalRequest,
 ): Promise<CreateTerminalResponse> {
   const terminalId = `claude-acp-terminal-${Date.now()}-${Math.random().toString(36).slice(2)}`
   const output: string[] = []
+  const base = input.active?.cwd ?? input.cwd
+  const cwd = params.cwd ? resolveACPPath(base, params.cwd) : base
+  await assertACPDirectPermissions(
+    input.active,
+    claudeACPDirectPermissionChecks({
+      kind: "terminal",
+      cwd: base,
+      command: params.command,
+      args: params.args,
+      terminalCwd: params.cwd,
+    }),
+  )
   const subprocess = Bun.spawn({
     cmd: [params.command, ...(params.args ?? [])],
-    cwd: params.cwd ? resolveACPPath(input.cwd, params.cwd) : input.cwd,
+    cwd,
     env: params.env ? { ...process.env, ...Object.fromEntries(params.env.map((entry) => [entry.name, entry.value])) } : process.env,
     stdin: "ignore",
     stdout: "pipe",
@@ -746,15 +1111,20 @@ async function createTerminal(
   const terminal: Terminal = {
     process: subprocess,
     output,
-    limit: params.outputByteLimit ?? 128_000,
+    limit: claudeACPTerminalOutputLimit(params.outputByteLimit),
+    truncated: false,
     exited: subprocess.exited.then((exitCode) => {
       terminal.exitStatus = { exitCode }
       return terminal.exitStatus
     }),
   }
   input.terminals.set(terminalId, terminal)
-  void collect(subprocess.stdout, output, terminal.limit)
-  void collect(subprocess.stderr, output, terminal.limit)
+  void collect(subprocess.stdout, output, terminal.limit, () => {
+    terminal.truncated = true
+  })
+  void collect(subprocess.stderr, output, terminal.limit, () => {
+    terminal.truncated = true
+  })
   return { terminalId }
 }
 
@@ -763,7 +1133,7 @@ async function terminalOutput(
   params: TerminalOutputRequest,
 ): Promise<TerminalOutputResponse> {
   const terminal = requireTerminal(terminals, params.terminalId)
-  return { output: terminal.output.join(""), truncated: false, exitStatus: terminal.exitStatus }
+  return { output: terminal.output.join(""), truncated: terminal.truncated, exitStatus: terminal.exitStatus }
 }
 
 async function waitForTerminalExit(
@@ -794,14 +1164,48 @@ function requireTerminal(terminals: Map<string, Terminal>, terminalID: string) {
   return terminal
 }
 
-async function collect(stream: ReadableStream<Uint8Array>, output: string[], limit: number) {
+export function claudeACPTerminalOutputLimit(value: number | null | undefined) {
+  if (typeof value !== "number") return TERMINAL_OUTPUT_DEFAULT
+  if (!Number.isFinite(value)) return TERMINAL_OUTPUT_DEFAULT
+  return Math.min(TERMINAL_OUTPUT_MAX, Math.max(0, Math.floor(value)))
+}
+
+export function claudeACPAppendOutput(output: string[], text: string, limit: number) {
+  if (!text) return false
+  output.push(text)
+  const trimmed = trimOutput(output.join(""), claudeACPTerminalOutputLimit(limit))
+  if (!trimmed.truncated) return false
+  output.length = 0
+  if (trimmed.text) output.push(trimmed.text)
+  return true
+}
+
+function trimOutput(text: string, limit: number) {
+  const bytes = Buffer.from(text, "utf8")
+  if (bytes.length <= limit) return { text, truncated: false }
+  if (limit <= 0) return { text: "", truncated: true }
+
+  let start = bytes.length - limit
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++
+  return { text: bytes.subarray(start).toString("utf8"), truncated: true }
+}
+
+async function collect(stream: ReadableStream<Uint8Array>, output: string[], limit: number, onTruncated?: () => void) {
   const reader = stream.getReader()
   const decoder = new TextDecoder()
   while (true) {
     const read = await reader.read().catch(() => undefined)
-    if (!read || read.done) return
-    output.push(decoder.decode(read.value, { stream: true }))
-    while (output.join("").length > limit) output.shift()
+    if (!read) return
+    if (read.done) {
+      appendCollectedOutput(decoder.decode())
+      return
+    }
+    appendCollectedOutput(decoder.decode(read.value, { stream: true }))
+  }
+
+  function appendCollectedOutput(text: string) {
+    if (!text) return
+    if (claudeACPAppendOutput(output, text, limit)) onTruncated?.()
   }
 }
 

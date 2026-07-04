@@ -223,8 +223,10 @@ const layer = Layer.effect(
       const msgs = onlySubtasks
         ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
         : yield* MessageV2.toModelMessagesEffect(context, mdl)
+      const ctx = yield* InstanceState.context
       const text = yield* llm
         .stream({
+          cwd: ctx.directory,
           agent: ag,
           user: firstInfo,
           system: [],
@@ -1270,6 +1272,7 @@ const layer = Layer.effect(
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
+              cwd: msg.path.cwd,
               user: lastUser,
               agent,
               permission: session.permission,

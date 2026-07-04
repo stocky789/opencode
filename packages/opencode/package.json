@@ -54,6 +54,7 @@
   "dependencies": {
     "@actions/core": "1.11.1",
     "@actions/github": "6.0.1",
+    "@agentclientprotocol/claude-agent-acp": "0.53.0",
     "@agentclientprotocol/sdk": "0.21.0",
     "@ai-sdk/alibaba": "1.0.17",
     "@ai-sdk/amazon-bedrock": "4.0.112",
@@ -74,6 +75,7 @@
     "@ai-sdk/togetherai": "2.0.41",
     "@ai-sdk/vercel": "2.0.39",
     "@ai-sdk/xai": "3.0.82",
+    "@anthropic-ai/sdk": "0.93.0",
     "@aws-sdk/credential-providers": "3.1057.0",
     "@clack/prompts": "1.0.0-alpha.1",
     "@effect/opentelemetry": "catalog:",
@@ -108,7 +110,6 @@
     "@solid-primitives/scheduled": "1.5.2",
     "@standard-schema/spec": "1.0.0",
     "@types/ws": "8.18.1",
-    "@agentclientprotocol/claude-agent-acp": "0.54.1",
     "@zip.js/zip.js": "2.7.62",
     "ai": "catalog:",
     "ai-gateway-provider": "3.1.2",

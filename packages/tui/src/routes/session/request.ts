@@ -13,15 +13,15 @@ export function visibleSessionRequests<T extends SessionRequest>(input: {
   sessions: readonly SessionInfo[]
   requests: Record<string, readonly T[] | undefined>
 }) {
-  if (input.currentSession?.parentID) return []
-
-  const parentID = input.currentSession?.id ?? input.routeSessionID
-  const sessionIDs = new Set([input.routeSessionID, parentID])
-  for (const session of input.sessions) {
-    if (session.id === parentID || session.parentID === parentID) {
-      sessionIDs.add(session.id)
-    }
-  }
+  const children = input.sessions.reduce<Record<string, string[]>>((acc, session) => {
+    if (!session.parentID) return acc
+    acc[session.parentID] = [...(acc[session.parentID] ?? []), session.id]
+    return acc
+  }, {})
+  const descendants = (sessionID: string): string[] =>
+    (children[sessionID] ?? []).flatMap((childID) => [childID, ...descendants(childID)])
+  const parentID = input.currentSession?.parentID ? input.routeSessionID : (input.currentSession?.id ?? input.routeSessionID)
+  const sessionIDs = new Set([input.routeSessionID, parentID, ...descendants(parentID)])
 
   return [...sessionIDs].toSorted().flatMap((sessionID) => input.requests[sessionID] ?? [])
 }
