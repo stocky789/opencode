@@ -1,4 +1,3 @@
-import "../index.css"
 import { Meta, Title } from "@solidjs/meta"
 import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import {
@@ -7,7 +6,6 @@ import {
   type LabUsageModelEntry,
   type MarketDay,
   type ModelUsagePoint,
-  type StatsHomeData,
   type StatsLabData,
 } from "@opencode-ai/stats-core/domain/home"
 import { createAsync, query, useParams } from "@solidjs/router"
@@ -21,17 +19,20 @@ import {
   catalogSlug,
   findModelCatalogLab,
   formatCatalogLabName,
-  getModelCatalog,
+  loadModelCatalog,
   type ModelCatalogEntry,
   type ModelCatalogLab,
 } from "../model-catalog"
 import { SectionHeading } from "../section-heading"
 import { runStatsEffect } from "../../stats-runtime"
 import { setStatsPageCacheHeaders } from "../stats-cache"
+import { ComparisonCardsSection, modelRefFromCatalog, uniqueComparisonPairs } from "../compare-cards"
+import { BreadcrumbSelect } from "../breadcrumb-select"
 import {
   applyThemePreference,
   Footer,
   getGitHubStars,
+  githubLink,
   Header,
   isThemePreference,
   themeStorageKey,
@@ -41,15 +42,33 @@ import {
 
 const statsUnfurlPath = "banner.png"
 
-const getLabData = query(async (lab: string) => {
-  "use server"
-  return runStatsEffect(getStatsLabData(lab))
-}, "getStatsLabData")
+type RelatedCatalogLab = Pick<ModelCatalogLab, "id" | "name" | "description"> & {
+  models: Pick<ModelCatalogEntry, "name">[]
+}
 
-const getHomeData = query(async () => {
+type LabPageData = {
+  lab: ModelCatalogLab | null
+  labs: RelatedCatalogLab[]
+  market: MarketDay[]
+  stats: StatsLabData | null
+}
+
+const getLabPageData = query(async (labParam: string) => {
   "use server"
-  return runStatsEffect(getStatsHomeData())
-}, "getStatsHomeData")
+  const [catalog, home] = await Promise.all([loadModelCatalog(), runStatsEffect(getStatsHomeData())])
+  const lab = findModelCatalogLab(catalog, labParam) ?? null
+  return {
+    lab,
+    labs: catalog.labs.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      description: entry.description,
+      models: entry.models.map((model) => ({ name: model.name })),
+    })),
+    market: home.market["2M"],
+    stats: lab ? await runStatsEffect(getStatsLabData(lab.id)) : null,
+  } satisfies LabPageData
+}, "getStatsLabPageData")
 
 type LabModelTooltipState = {
   model: ModelCatalogEntry
@@ -66,19 +85,9 @@ export default function StatsLab() {
   setStatsPageCacheHeaders(event?.response.headers)
   const params = useParams()
   const labParam = createMemo(() => params.lab ?? "")
-  const catalog = createAsync(() => getModelCatalog())
-  const lab = createMemo(() => {
-    const data = catalog()
-    if (!data) return undefined
-    return findModelCatalogLab(data, labParam()) ?? null
-  })
-  const stats = createAsync(() => {
-    const entry = lab()
-    if (catalog() === undefined || entry === undefined) return Promise.resolve(undefined)
-    if (!entry) return Promise.resolve(null)
-    return getLabData(entry.id)
-  })
-  const homeStats = createAsync((): Promise<StatsHomeData | undefined> => getHomeData())
+  const page = createAsync(() => getLabPageData(labParam()))
+  const lab = createMemo(() => page()?.lab)
+  const stats = createMemo(() => page()?.stats)
   const githubStars = createAsync(() => getGitHubStars())
   const [themePreference, setThemePreference] = createSignal<ThemePreference>("system")
   const labName = createMemo(() => lab()?.name ?? formatCatalogLabName(labParam()))
@@ -133,21 +142,27 @@ export default function StatsLab() {
       <Meta name="twitter:description" content={labDescription()} />
       <Meta name="twitter:image" content={statsUnfurlUrl} />
       <Meta name="twitter:image:alt" content={i18n.t("app.unfurlAlt")} />
-      <Header githubStars={githubStars() ?? "150K"} links={labHeaderLinks()} brandHref={import.meta.env.BASE_URL} />
+      <Header
+        githubStars={githubStars() ?? githubLink.fallbackStars}
+        links={labHeaderLinks()}
+        brandHref={import.meta.env.BASE_URL}
+      />
       <div data-component="container">
         <div data-component="content">
-          <Show when={catalog() !== undefined} fallback={<LabLoading />}>
-            <Show when={lab()} fallback={<LabNotFound lab={labParam()} labs={catalog()?.labs ?? []} />}>
+          <Show when={page() !== undefined} fallback={<LabLoading />}>
+            <Show when={lab()} fallback={<LabNotFound lab={labParam()} labs={page()?.labs ?? []} />}>
               {(data) => (
                 <>
-                  <LabHero lab={data()} labs={catalog()?.labs ?? []} />
+                  <LabHero lab={data()} labs={page()?.labs ?? []} />
                   <LabOverview lab={data()} data={stats() ?? null} />
                   <LabUsageSection lab={data()} data={stats() ?? null} />
                   <LabModelsSection lab={data()} usage={stats()?.models ?? []} />
-                  <LabRelatedSection
-                    lab={data()}
-                    labs={catalog()?.labs ?? []}
-                    market={homeStats()?.market["2M"] ?? []}
+                  <LabRelatedSection lab={data()} labs={page()?.labs ?? []} market={page()?.market ?? []} />
+                  <ComparisonCardsSection
+                    pairs={labComparisonPairs(data(), stats()?.models ?? [])}
+                    title={`${data().name} Model Comparisons`}
+                    description="Model pairs from this lab."
+                    variant="featured"
                   />
                 </>
               )}
@@ -158,6 +173,7 @@ export default function StatsLab() {
           themePreference={themePreference()}
           onThemePreferenceChange={updateThemePreference}
           links={labFooterLinks()}
+          bridge={{ href: "#model-comparison", label: "MODEL COMPARISONS" }}
         />
       </div>
     </main>
@@ -174,7 +190,7 @@ function LabLoading() {
   )
 }
 
-function LabNotFound(props: { lab: string; labs: ModelCatalogLab[] }) {
+function LabNotFound(props: { lab: string; labs: RelatedCatalogLab[] }) {
   const i18n = useI18n()
   const labName = () => formatCatalogLabName(props.lab)
   return (
@@ -186,7 +202,7 @@ function LabNotFound(props: { lab: string; labs: ModelCatalogLab[] }) {
   )
 }
 
-function LabHero(props: { lab: ModelCatalogLab; labs: ModelCatalogLab[] }) {
+function LabHero(props: { lab: ModelCatalogLab; labs: RelatedCatalogLab[] }) {
   return (
     <section id="overview" data-section="lab-hero">
       <LabHeroBreadcrumb label={props.lab.name} labs={props.labs} />
@@ -195,9 +211,10 @@ function LabHero(props: { lab: ModelCatalogLab; labs: ModelCatalogLab[] }) {
   )
 }
 
-function LabHeroBreadcrumb(props: { label: string; labs?: ModelCatalogLab[] }) {
+function LabHeroBreadcrumb(props: { label: string; labs?: RelatedCatalogLab[] }) {
   const language = useLanguage()
   const labs = () => props.labs ?? []
+  const current = () => labs().find((lab) => lab.name === props.label)
   return (
     <nav data-component="lab-hero-breadcrumb" aria-label="Data breadcrumb">
       <a data-slot="lab-hero-crumb" href={language.route(import.meta.env.BASE_URL)}>
@@ -210,32 +227,23 @@ function LabHeroBreadcrumb(props: { label: string; labs?: ModelCatalogLab[] }) {
           <span data-slot="lab-hero-crumb" data-current="true" aria-current="page">
             <span>{props.label}</span>
             <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M4.75 6.25L8 9.5L11.25 6.25" fill="none" stroke="currentColor" stroke-width="1.5" />
+              <path d="M5 6.5L8 9.5L11 6.5" fill="none" stroke="currentColor" />
             </svg>
           </span>
         }
       >
-        <details data-component="lab-hero-menu">
-          <summary data-slot="lab-hero-crumb" data-current="true" aria-current="page">
-            <span>{props.label}</span>
-            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M4.75 6.25L8 9.5L11.25 6.25" fill="none" stroke="currentColor" stroke-width="1.5" />
-            </svg>
-          </summary>
-          <div data-slot="lab-hero-options">
-            <For each={labs()}>
-              {(lab) => (
-                <a
-                  data-slot="lab-hero-option"
-                  data-current={lab.name === props.label ? "true" : undefined}
-                  href={language.route(`${import.meta.env.BASE_URL}${lab.id}`)}
-                >
-                  {lab.name}
-                </a>
-              )}
-            </For>
-          </div>
-        </details>
+        <BreadcrumbSelect
+          ariaLabel="Choose a lab"
+          current
+          label={props.label}
+          options={labs().map((lab) => ({
+            href: language.route(`${import.meta.env.BASE_URL}${lab.id}`),
+            label: lab.name,
+            value: lab.id,
+          }))}
+          value={current()?.id ?? ""}
+          variant="lab"
+        />
       </Show>
     </nav>
   )
@@ -559,24 +567,28 @@ function LabModelRow(props: {
 }) {
   const i18n = useI18n()
   const language = useLanguage()
-  const showTooltip = (x: number, y: number) => {
+  const showTooltip = (target: HTMLAnchorElement) => {
+    const rect = target.getBoundingClientRect()
     const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth
     const viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight
+    const anchorX = viewportWidth > 0 ? Math.min(Math.max(rect.left + 320, 24), viewportWidth - 24) : rect.left + 320
     props.onTooltipChange({
       model: props.model,
-      placement: viewportWidth > 0 && x > viewportWidth - 280 ? "left" : "right",
+      placement: viewportWidth > 0 && anchorX > viewportWidth - 280 ? "left" : "right",
       usage: props.usage,
-      x,
-      y: viewportHeight > 0 ? Math.min(Math.max(y, 96), viewportHeight - 128) : y,
+      x: anchorX,
+      y:
+        viewportHeight > 0
+          ? Math.min(Math.max(rect.top + rect.height / 2, 96), viewportHeight - 128)
+          : rect.top + rect.height / 2,
     })
   }
   const showPointerTooltip: JSX.EventHandler<HTMLAnchorElement, PointerEvent> = (event) => {
     if (event.pointerType === "touch") return
-    showTooltip(event.clientX, event.clientY)
+    showTooltip(event.currentTarget)
   }
   const showFocusTooltip: JSX.EventHandler<HTMLAnchorElement, FocusEvent> = (event) => {
-    const rect = event.currentTarget.getBoundingClientRect()
-    showTooltip(rect.left + rect.width * 0.58, rect.top + rect.height / 2)
+    showTooltip(event.currentTarget)
   }
   return (
     <a
@@ -587,11 +599,12 @@ function LabModelRow(props: {
       onBlur={() => props.onTooltipChange(undefined)}
       onFocus={showFocusTooltip}
       onPointerEnter={showPointerTooltip}
+      onPointerDown={() => props.onTooltipChange(undefined)}
       onPointerLeave={(event) => {
         if (event.pointerType === "touch") return
         props.onTooltipChange(undefined)
       }}
-      onPointerMove={showPointerTooltip}
+      onClick={() => props.onTooltipChange(undefined)}
     >
       <span data-slot="lab-model-cell" data-column="model" role="cell">
         <span data-slot="lab-model-avatar" aria-hidden="true">
@@ -663,7 +676,7 @@ function LabModelTooltip(props: { state: LabModelTooltipState }) {
   )
 }
 
-function LabRelatedSection(props: { lab: ModelCatalogLab; labs: ModelCatalogLab[]; market: MarketDay[] }) {
+function LabRelatedSection(props: { lab: ModelCatalogLab; labs: RelatedCatalogLab[]; market: MarketDay[] }) {
   const related = createMemo(() => relatedLabs(props.lab, props.labs, props.market))
   return (
     <section id="related-labs" data-section="model-panel" data-variant="lab-related">
@@ -727,9 +740,34 @@ function LabEmptyState(props: { title: string; description: string }) {
   )
 }
 
-type RelatedLabEntry = { lab: ModelCatalogLab; share: number; tokens: number }
+function labComparisonPairs(lab: ModelCatalogLab, usage: LabUsageModelEntry[]) {
+  const usageRefs = usage.slice(0, 4).map((model) => ({
+    name: model.model,
+    lab: model.provider,
+    slug: model.slug,
+    labName: model.author,
+    metric: formatTokens(model.tokens),
+  }))
+  const refs = usageRefs.length > 1 ? usageRefs : lab.models.slice(0, 4).map(modelRefFromCatalog)
+  return uniqueComparisonPairs(
+    (
+      [
+        [0, 1, "Most-used lab pair"],
+        [0, 2, "Lab alternative"],
+        [1, 2, "Adjacent lab pair"],
+        [2, 3, "Same lab pair"],
+      ] as const
+    ).flatMap(([firstIndex, secondIndex, detail]) => {
+      const first = refs[firstIndex]
+      const second = refs[secondIndex]
+      return first && second ? [{ first, second, detail }] : []
+    }),
+  )
+}
 
-function relatedLabs(current: ModelCatalogLab, labs: ModelCatalogLab[], market: MarketDay[]): RelatedLabEntry[] {
+type RelatedLabEntry = { lab: RelatedCatalogLab; share: number; tokens: number }
+
+function relatedLabs(current: ModelCatalogLab, labs: RelatedCatalogLab[], market: MarketDay[]): RelatedLabEntry[] {
   const stats = relatedLabStats(labs, market)
   return labs
     .filter((lab) => lab.id !== current.id)
@@ -738,8 +776,8 @@ function relatedLabs(current: ModelCatalogLab, labs: ModelCatalogLab[], market: 
     .slice(0, 3)
 }
 
-function relatedLabStats(labs: ModelCatalogLab[], market: MarketDay[]) {
-  const labByKey = new Map<string, ModelCatalogLab>()
+function relatedLabStats(labs: RelatedCatalogLab[], market: MarketDay[]) {
+  const labByKey = new Map<string, RelatedCatalogLab>()
   labs.forEach((lab) => {
     labByKey.set(lab.id, lab)
     labByKey.set(catalogSlug(lab.name), lab)
@@ -764,7 +802,7 @@ function relatedLabStats(labs: ModelCatalogLab[], market: MarketDay[]) {
   )
 }
 
-function labRelatedDescription(lab: ModelCatalogLab) {
+function labRelatedDescription(lab: RelatedCatalogLab) {
   return lab.description ?? ""
 }
 
@@ -851,7 +889,7 @@ function trimNumber(value: number, digits: number) {
 
 function usageStripHeight(value: number, max: number) {
   if (value <= 0 || max <= 0) return 0
-  return Math.max(1, (value / max) * 40)
+  return Math.max(2, (value / max) * 76)
 }
 
 function usageLineY(value: number, max: number) {

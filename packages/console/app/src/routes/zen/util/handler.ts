@@ -86,7 +86,7 @@ export async function handler(
   type CostInfo = ReturnType<typeof calculateCost>
 
   const MAX_FAILOVER_RETRIES = 3
-  const MAX_429_RETRIES = 3
+  const MAX_RETRYABLE_STATUS_RETRIES = 3
   const dict = i18n(localeFromRequest(input.request))
   const t = (key: Key, params?: Record<string, string | number>) => resolve(dict[key], params)
   const ADMIN_WORKSPACES = [
@@ -136,16 +136,17 @@ export async function handler(
             Workspace.setDefaultRegion({ country: countryFromRequest(input.request) }),
           )
         })()
-    /*
-    if (true) {
-      if (!allowedRegions?.includes("unavailable"))
-        throw new RegionError(
-          t("zen.api.error.regionNotAllowed", {
-            consoleGoUrl: `https://opencode.ai/workspace/${authInfo.workspaceID}/go`,
-          }),
-        )
-    }
-    */
+    if (
+      authInfo &&
+      opts.modelList === "lite" &&
+      modelInfo.id === "deepseek-v4-flash" &&
+      !allowedRegions?.includes("cn")
+    )
+      throw new RegionError(
+        t("zen.api.error.regionNotAllowed", {
+          consoleGoUrl: `https://opencode.ai/workspace/${authInfo.workspaceID}/go`,
+        }),
+      )
     const stickyId = sessionId ? sessionId : (authInfo?.workspaceID ?? ip)
     const stickyTracker = createStickyTracker(modelInfo.id, modelInfo.stickyProvider, stickyId)
     const stickyProvider = await stickyTracker?.get()
@@ -179,6 +180,8 @@ export async function handler(
       logger.metric({
         provider: providerInfo.id,
         "provider.model": providerInfo.model,
+        shallowProvider: providerInfo.id,
+        "shallowProvider.model": providerInfo.model,
       })
 
       const startTimestamp = Date.now()
@@ -194,7 +197,9 @@ export async function handler(
                   if (Array.isArray(v)) return [[k, v]]
                   if (typeof v === "object") return [[k, replacer(v)]]
                   if (typeof v === "string") {
-                    if (v === "$workspace") return authInfo?.workspaceID ? [[k, authInfo?.workspaceID]] : []
+                    if (v === "$workspace") return authInfo?.workspaceID ? [[k, authInfo.workspaceID]] : []
+                    if (v === "$org")
+                      return authInfo?.workspaceID ? [[k, authInfo.workspaceID.replace("wrk_", "org_")]] : []
                     if (v === "$user") return stickyId ? [[k, stickyId]] : []
                     if (v.startsWith("$header.")) {
                       const headerValue = input.request.headers.get(v.slice(8))
@@ -210,39 +215,52 @@ export async function handler(
       )
       logger.debug("REQUEST URL: " + reqUrl)
       logger.debug("REQUEST: " + reqBody.substring(0, 300) + "...")
-      const res = await fetchWith429Retry(reqUrl, {
-        method: "POST",
-        headers: (() => {
-          const headers = new Headers(input.request.headers)
-          providerInfo.modifyHeaders(headers, providerInfo.apiKey, stickyId)
-          Object.entries(providerInfo.headerModifier ?? {}).forEach(([k, v]) => {
-            if (v === "$ip") return headers.set(k, ip)
-            if (v === "$caller") return headers.set(k, stickyId)
-            if (v === "$session") return headers.set(k, sessionId)
-            if (v === "$model") return headers.set(k, model)
-            if (v === "$request") return headers.set(k, requestId)
-            if (v === "$project") return headers.set(k, projectId)
-            if (v === "$workspace") {
-              if (authInfo?.workspaceID) headers.set(k, authInfo.workspaceID)
-              return
-            }
-            headers.set(k, v)
-          })
-          headers.delete("host")
-          headers.delete("content-length")
-          headers.delete("x-opencode-request")
-          headers.delete("x-opencode-session")
-          headers.delete("x-opencode-project")
-          headers.delete("x-opencode-client")
-          return headers
-        })(),
-        body: reqBody,
-        // Propagate caller disconnects to the upstream provider request so
-        // abandoned Console requests do not leave orphaned inference work open.
-        signal: input.request.signal,
-      })
+      const isNewInference =
+        providerInfo.id.startsWith("console.") ||
+        providerInfo.id.startsWith("console-go.") ||
+        providerInfo.id.startsWith("inf.") ||
+        providerInfo.id.startsWith("inf-go.")
+      const res = await fetchWithRetryableStatus(
+        reqUrl,
+        {
+          method: "POST",
+          headers: (() => {
+            const headers = new Headers(input.request.headers)
+            providerInfo.modifyHeaders(headers, providerInfo.apiKey, stickyId)
+            Object.entries(providerInfo.headerModifier ?? {}).forEach(([k, v]) => {
+              if (v === "$ip") return headers.set(k, ip)
+              if (v === "$caller") return headers.set(k, stickyId)
+              if (v === "$session") return headers.set(k, sessionId)
+              if (v === "$model") return headers.set(k, model)
+              if (v === "$request") return headers.set(k, requestId)
+              if (v === "$project") return headers.set(k, projectId)
+              if (v === "$workspace") {
+                if (authInfo?.workspaceID) headers.set(k, authInfo.workspaceID)
+                return
+              }
+              if (v === "$org") {
+                if (authInfo?.workspaceID) headers.set(k, authInfo.workspaceID.replace("wrk_", "org_"))
+                return
+              }
+              headers.set(k, v)
+            })
+            headers.delete("host")
+            headers.delete("content-length")
+            headers.delete("x-opencode-request")
+            headers.delete("x-opencode-session")
+            headers.delete("x-opencode-project")
+            headers.delete("x-opencode-client")
+            return headers
+          })(),
+          body: reqBody,
+          // Propagate caller disconnects to the upstream provider request so
+          // abandoned Console requests do not leave orphaned inference work open.
+          signal: input.request.signal,
+        },
+        { count: isNewInference ? MAX_RETRYABLE_STATUS_RETRIES : 0 },
+      )
 
-      if (providerInfo.id.startsWith("console.") || providerInfo.id.startsWith("console-go.")) {
+      if (isNewInference) {
         const resEndpointId = res.headers.get("x-opencode-endpoint-id")
         const resEndpointModelId = res.headers.get("x-opencode-upstream-model-id")
         if (resEndpointId && resEndpointModelId)
@@ -261,6 +279,7 @@ export async function handler(
 
       // Try another provider => stop retrying if using fallback provider
       if (
+        //!isNewInference &&
         res.status !== 200 &&
         // ie. 400 error is usually provider error like malformed request
         res.status !== 400 &&
@@ -299,7 +318,7 @@ export async function handler(
     logger.debug("STATUS: " + res.status + " " + res.statusText)
 
     // Handle non-streaming response
-    if (!isStream || [400, 404, 429].includes(res.status)) {
+    if (!isStream || [400, 404, 429, 529].includes(res.status)) {
       const json = await res.json()
       await rateLimiter?.track()
       const usage = providerInfo.extractUsage(json)
@@ -689,6 +708,9 @@ export async function handler(
           workspace: {
             id: WorkspaceTable.id,
             region: WorkspaceTable.region,
+            isBlocked: WorkspaceTable.is_blocked,
+            isFlaggedByAnthropic: WorkspaceTable.is_flagged_by_anthropic,
+            isFlaggedByOpenAI: WorkspaceTable.is_flagged_by_openai,
           },
           billing: {
             balance: BillingTable.balance,
@@ -764,6 +786,12 @@ export async function handler(
     )
 
     if (!data) throw new AuthError(t("zen.api.error.invalidApiKey"))
+    if (
+      data.workspace.isBlocked ||
+      (data.workspace.isFlaggedByAnthropic && modelInfo.id.startsWith("claude-")) ||
+      (data.workspace.isFlaggedByOpenAI && modelInfo.id.startsWith("gpt-"))
+    )
+      throw new AuthError(t("zen.api.error.requestBlockedByUpstreamProvider"))
     if (
       modelInfo.id.startsWith("alpha-") &&
       Resource.App.stage === "production" &&
@@ -991,11 +1019,11 @@ export async function handler(
     providerInfo.apiKey = authInfo.provider.credentials
   }
 
-  async function fetchWith429Retry(url: string, options: RequestInit, retry = { count: 0 }) {
+  async function fetchWithRetryableStatus(url: string, options: RequestInit, retry = { count: 0 }) {
     const res = await fetch(url, options)
-    if (res.status === 429 && retry.count < MAX_429_RETRIES) {
+    if ([429, 529].includes(res.status) && retry.count < MAX_RETRYABLE_STATUS_RETRIES) {
       await new Promise((resolve) => setTimeout(resolve, Math.pow(2, retry.count) * 500))
-      return fetchWith429Retry(url, options, { count: retry.count + 1 })
+      return fetchWithRetryableStatus(url, options, { count: retry.count + 1 })
     }
     return res
   }
@@ -1160,28 +1188,29 @@ export async function handler(
             const week = getWeekBounds(new Date())
             const month = getMonthlyBounds(new Date(), authInfo.lite!.timeCreated)
             const rollingWindowSeconds = lite.rollingWindow * 3600
+            const quotaCost = Math.round(cost * modelInfo.costMultiplier)
             return [
               db
                 .update(LiteTable)
                 .set({
                   monthlyUsage: sql`
               CASE
-                WHEN ${LiteTable.timeMonthlyUpdated} >= ${month.start} THEN ${LiteTable.monthlyUsage} + ${cost}
-                ELSE ${cost}
+                WHEN ${LiteTable.timeMonthlyUpdated} >= ${month.start} THEN ${LiteTable.monthlyUsage} + ${quotaCost}
+                ELSE ${quotaCost}
               END
             `,
                   timeMonthlyUpdated: sql`now()`,
                   weeklyUsage: sql`
               CASE
-                WHEN ${LiteTable.timeWeeklyUpdated} >= ${week.start} THEN ${LiteTable.weeklyUsage} + ${cost}
-                ELSE ${cost}
+                WHEN ${LiteTable.timeWeeklyUpdated} >= ${week.start} THEN ${LiteTable.weeklyUsage} + ${quotaCost}
+                ELSE ${quotaCost}
               END
             `,
                   timeWeeklyUpdated: sql`now()`,
                   rollingUsage: sql`
               CASE
-                WHEN UNIX_TIMESTAMP(${LiteTable.timeRollingUpdated}) >= UNIX_TIMESTAMP(now()) - ${rollingWindowSeconds} THEN ${LiteTable.rollingUsage} + ${cost}
-                ELSE ${cost}
+                WHEN UNIX_TIMESTAMP(${LiteTable.timeRollingUpdated}) >= UNIX_TIMESTAMP(now()) - ${rollingWindowSeconds} THEN ${LiteTable.rollingUsage} + ${quotaCost}
+                ELSE ${quotaCost}
               END
             `,
                   timeRollingUpdated: sql`
