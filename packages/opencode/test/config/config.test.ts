@@ -597,12 +597,12 @@ accountTokenIt.instance("resolves env templates in account config with account t
   }),
 )
 
-it.instance("validates config schema and throws on invalid fields", () =>
+it.instance("validates config schema and throws on invalid values", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance
     yield* writeConfigEffect(test.directory, {
       $schema: "https://opencode.ai/config.json",
-      invalid_field: "should cause error",
+      model: 42,
     })
     const exit = yield* Config.use.get().pipe(Effect.exit)
     expect(Exit.isFailure(exit)).toBe(true)
@@ -920,6 +920,31 @@ it.effect("does not try to install dependencies in read-only OPENCODE_CONFIG_DIR
     yield* Effect.addFinalizer(() => FSUtil.use.chmod(readonly, 0o755).pipe(Effect.ignore))
 
     yield* withProcessEnv("OPENCODE_CONFIG_DIR", readonly, Config.use.get().pipe(provideInstanceEffect(dir)))
+  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
+)
+
+it.effect("ignores an inaccessible OPENCODE_CONFIG_DIR", () =>
+  Effect.gen(function* () {
+    if (process.platform === "win32") return
+
+    const dir = yield* tmpdirScoped()
+    const configDir = path.join(dir, "inaccessible")
+    yield* FSUtil.use.ensureDir(configDir)
+    yield* FSUtil.use.chmod(configDir, 0o000)
+    yield* Effect.addFinalizer(() => FSUtil.use.chmod(configDir, 0o755).pipe(Effect.ignore))
+
+    yield* withProcessEnv("OPENCODE_CONFIG_DIR", configDir, Config.use.get().pipe(provideInstanceEffect(dir)))
+  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
+)
+
+it.effect("creates a missing OPENCODE_CONFIG_DIR", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const configDir = path.join(dir, "configdir")
+
+    yield* withProcessEnv("OPENCODE_CONFIG_DIR", configDir, Config.use.get().pipe(provideInstanceEffect(dir)))
+
+    expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("node_modules")
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
 )
 
@@ -1306,7 +1331,7 @@ it.instance("permission config preserves user key order", () =>
   }),
 )
 
-test("config parser preserves permission order while rejecting unknown top-level keys", () => {
+test("config parser preserves permission order while ignoring unknown top-level keys", () => {
   const config = ConfigParse.schema(
     ConfigV1.Info,
     {
@@ -1315,18 +1340,13 @@ test("config parser preserves permission order while rejecting unknown top-level
         "*": "deny",
         edit: "ask",
       },
+      plugins: ["example"],
     },
     "test",
   )
 
   expect(Object.keys(config.permission!)).toEqual(["bash", "*", "edit"])
-  try {
-    ConfigParse.schema(ConfigV1.Info, { invalid_field: true }, "test")
-    throw new Error("expected config parse to fail")
-  } catch (err) {
-    const error = err as { data?: { issues?: Array<{ code?: string; keys?: string[]; path?: string[] }> } }
-    expect(error.data?.issues?.[0]).toMatchObject({ code: "unrecognized_keys", keys: ["invalid_field"], path: [] })
-  }
+  expect(config).not.toHaveProperty("plugins")
 })
 
 // MCP config merging tests
