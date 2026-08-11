@@ -20,6 +20,7 @@ import type {
   ReleaseTerminalResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionConfigOption,
   SessionNotification,
   TerminalOutputRequest,
   TerminalOutputResponse,
@@ -115,6 +116,7 @@ type Connection = {
   readonly stderr: string[]
   readonly terminals: Map<string, Terminal>
   sessionID: string
+  configOptions: SessionConfigOption[]
   lock: Promise<void>
   used: boolean
   disposed: boolean
@@ -214,12 +216,20 @@ async function* run(input: StreamInput) {
           tools: new Map(),
         }
         try {
+          const commandText = currentPromptText(input.messages)
+          const command = claudeACPConfigCommand(commandText)
+          if (command) {
+            const message = await applyConfigCommand(activeConnection, command)
+            activeConnection.active?.queue.text(message)
+            finish(queue, "stop")
+            return
+          }
           const response = await activeConnection.client.prompt({
             sessionId: activeConnection.sessionID,
             prompt: [
               {
                 type: "text",
-                text: activeConnection.used ? currentPromptText(input.messages) : promptText(input.messages),
+                text: activeConnection.used ? commandText : promptText(input.messages),
               },
             ],
           })
@@ -323,10 +333,11 @@ async function createConnection(input: StreamInput, key: string): Promise<Connec
     stderr,
     terminals,
     sessionID: "",
+    configOptions: [] as SessionConfigOption[],
     lock: Promise.resolve(),
     used: false,
     disposed: false,
-  } as Connection
+  } as unknown as Connection
   activeConnections.add(connection)
   connection.client = new ClientSideConnection(
     () => makeClient(connection),
@@ -356,6 +367,7 @@ async function createConnection(input: StreamInput, key: string): Promise<Connec
     const session = await connection.client.newSession({ cwd: input.cwd, mcpServers: [...input.mcpServers] })
     if (input.abort.aborted) throw abortError()
     connection.sessionID = session.sessionId
+    connection.configOptions = session.configOptions ?? []
     scheduleDispose(connection)
     return connection
   } catch (error) {
@@ -447,6 +459,104 @@ function claudeEnv(modelID: string) {
   }
 }
 
+export type ClaudeACPConfigCommand = {
+  readonly configId: "effort" | "model" | "fast"
+  readonly value?: string
+}
+
+/** Claude Code disables /effort under ACP/SDK; OpenCode handles these locally via setSessionConfigOption. */
+export function claudeACPConfigCommand(text: string): ClaudeACPConfigCommand | undefined {
+  const match = text.trim().match(/^\/(effort|model|fast)(?:\s+(\S+))?\s*$/i)
+  if (!match) return
+  return {
+    configId: match[1].toLowerCase() as ClaudeACPConfigCommand["configId"],
+    value: match[2]?.toLowerCase(),
+  }
+}
+
+export function claudeACPConfigOptionValues(option: SessionConfigOption | undefined) {
+  if (!option) return []
+  if (option.type === "boolean") return ["on", "off"]
+  if (option.type !== "select" || !Array.isArray(option.options)) return []
+  return option.options.flatMap((entry) => ("options" in entry ? entry.options : [entry])).map((entry) => entry.value)
+}
+
+export function claudeACPConfigOptionCurrent(option: SessionConfigOption | undefined) {
+  if (!option) return
+  if (option.type === "boolean") return option.currentValue ? "on" : "off"
+  if (typeof option.currentValue === "string") return option.currentValue
+}
+
+async function applyConfigCommand(connection: Connection, command: ClaudeACPConfigCommand) {
+  const option = connection.configOptions.find((item) => item.id === command.configId)
+  if (!option) {
+    return `${labelForConfig(command.configId)} isn't available for the current Claude Code session.`
+  }
+
+  const current = claudeACPConfigOptionCurrent(option)
+  const allowed = claudeACPConfigOptionValues(option)
+  if (!command.value) {
+    const choices = allowed.length > 0 ? allowed.join(", ") : "unknown"
+    return `${labelForConfig(command.configId)} is currently ${current ?? "unset"}. Available: ${choices}`
+  }
+
+  const value = resolveConfigValue(command, allowed, current)
+  if (!value) {
+    return `Invalid ${command.configId} value "${command.value}". Available: ${allowed.join(", ") || "none"}`
+  }
+  if (value === current) return `${labelForConfig(command.configId)} is already ${value}`
+
+  await setConfigOption(connection, command.configId, value, option)
+  const next = claudeACPConfigOptionCurrent(connection.configOptions.find((item) => item.id === command.configId))
+  return `${labelForConfig(command.configId)} set to ${next ?? value}`
+}
+
+function resolveConfigValue(command: ClaudeACPConfigCommand, allowed: string[], current: string | undefined) {
+  if (!command.value) return
+  if (command.configId === "fast") {
+    if (command.value === "on" || command.value === "true" || command.value === "1") return pickAllowed(allowed, "on")
+    if (command.value === "off" || command.value === "false" || command.value === "0") return pickAllowed(allowed, "off")
+    if (command.value === "toggle") return current === "on" ? pickAllowed(allowed, "off") : pickAllowed(allowed, "on")
+  }
+  if (allowed.includes(command.value)) return command.value
+  // Model aliases are resolved by Claude ACP when the exact ID is absent.
+  if (command.configId === "model") return command.value
+}
+
+function pickAllowed(allowed: string[], value: string) {
+  return allowed.includes(value) ? value : undefined
+}
+
+function labelForConfig(configId: ClaudeACPConfigCommand["configId"]) {
+  if (configId === "effort") return "Effort"
+  if (configId === "model") return "Model"
+  return "Fast mode"
+}
+
+async function setConfigOption(
+  connection: Connection,
+  configId: string,
+  value: string,
+  option: SessionConfigOption,
+) {
+  if (option.type === "boolean") {
+    const response = await connection.client.setSessionConfigOption({
+      sessionId: connection.sessionID,
+      configId,
+      type: "boolean",
+      value: value === "on",
+    })
+    connection.configOptions = response.configOptions ?? connection.configOptions
+    return
+  }
+  const response = await connection.client.setSessionConfigOption({
+    sessionId: connection.sessionID,
+    configId,
+    value,
+  })
+  connection.configOptions = response.configOptions ?? connection.configOptions
+}
+
 function makeClient(connection: Connection): Client {
   return {
     sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection, params),
@@ -463,6 +573,10 @@ function makeClient(connection: Connection): Client {
 }
 
 function sessionUpdate(connection: Connection, params: SessionNotification) {
+  if (params.update.sessionUpdate === "config_option_update") {
+    connection.configOptions = params.update.configOptions ?? connection.configOptions
+    return
+  }
   const active = connection.active
   if (!active) return
   if (params.update.sessionUpdate === "usage_update") {
