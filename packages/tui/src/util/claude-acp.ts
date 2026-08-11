@@ -27,12 +27,22 @@ export const ClaudeACPSlashCommands: readonly ClaudeACPSlashCommand[] = [
     description: "Enable debug logging for this session",
   },
   {
+    name: "effort",
+    hint: "[low|medium|high|max|auto]",
+    description: "Set Claude Code reasoning effort",
+  },
+  {
     name: "heapdump",
     description: "Dump the JS heap to Desktop",
   },
   {
     name: "init",
     description: "Initialize CLAUDE.md guidance",
+  },
+  {
+    name: "model",
+    hint: "[model]",
+    description: "Switch the Claude Code model",
   },
   {
     name: "reload-skills",
