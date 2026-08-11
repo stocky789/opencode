@@ -34,6 +34,7 @@ import { LLMAISDK } from "./llm/ai-sdk"
 import { ClaudeACP } from "./llm/claude-acp"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { Session } from "./session"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -96,6 +97,7 @@ const live: Layer.Layer<
   | EventV2Bridge.Service
   | LLMClientService
   | RuntimeFlags.Service
+  | Session.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -108,6 +110,7 @@ const live: Layer.Layer<
     const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    const session = yield* Session.Service
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       yield* Effect.logInfo("stream", {
@@ -156,6 +159,19 @@ const live: Layer.Layer<
             ruleset: Permission.merge(input.agent.permission, input.permission ?? []),
             permission: prompts.permission,
             question: prompts.question,
+            onConfig: (config) =>
+              bridge.promise(
+                Effect.gen(function* () {
+                  const current = yield* session.get(input.sessionID)
+                  yield* session.setMetadata({
+                    sessionID: input.sessionID,
+                    metadata: {
+                      ...current.metadata,
+                      claudeAcp: config,
+                    },
+                  })
+                }),
+              ),
           }),
         }
       }
@@ -519,6 +535,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     llmClient,
     RuntimeFlags.node,
+    Session.node,
   ],
 })
 

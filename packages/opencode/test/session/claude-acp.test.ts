@@ -5,6 +5,7 @@ import {
   claudeACPConfigCommand,
   claudeACPConfigOptionCurrent,
   claudeACPConfigOptionValues,
+  claudeACPConfigState,
   claudeACPConnectionKey,
   resolveFastDesired,
   claudeACPDirectPermissionChecks,
@@ -68,6 +69,49 @@ describe("Claude ACP config slash commands", () => {
       "on",
       "off",
     ])
+  })
+
+  it("derives footer state from ACP config options", () => {
+    expect(
+      claudeACPConfigState([
+        {
+          id: "effort",
+          name: "Effort",
+          type: "select",
+          currentValue: "high",
+          options: [
+            { value: "default", name: "Default" },
+            { value: "high", name: "High" },
+          ],
+        },
+        {
+          id: "fast",
+          name: "Fast",
+          type: "boolean",
+          currentValue: true,
+        },
+      ]),
+    ).toEqual({ effort: "high", fast: true })
+
+    expect(
+      claudeACPConfigState([
+        {
+          id: "effort",
+          name: "Effort",
+          type: "select",
+          currentValue: "default",
+          options: [{ value: "default", name: "Default" }],
+        },
+        {
+          id: "fast",
+          name: "Fast",
+          type: "boolean",
+          currentValue: false,
+        },
+      ]),
+    ).toEqual({ effort: "default", fast: false })
+
+    expect(claudeACPConfigState([])).toEqual({})
   })
 })
 
