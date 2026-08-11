@@ -28,13 +28,13 @@ export const ClaudeACPSlashCommands: readonly ClaudeACPSlashCommand[] = [
   },
   {
     name: "effort",
-    hint: "[low|medium|high|max|auto]",
+    hint: "[low|medium|high|max]",
     description: "Set Claude Code reasoning effort",
   },
   {
     name: "fast",
     hint: "[on|off]",
-    description: "Toggle Claude Code fast mode",
+    description: "Toggle Claude Code fast mode (Opus)",
   },
   {
     name: "heapdump",
