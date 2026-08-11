@@ -2,6 +2,9 @@ import { describe, expect, it } from "bun:test"
 import {
   claudeACPAppendOutput,
   claudeACPCompactionStatus,
+  claudeACPConfigCommand,
+  claudeACPConfigOptionCurrent,
+  claudeACPConfigOptionValues,
   claudeACPConnectionKey,
   claudeACPDirectPermissionChecks,
   claudeACPElicitationContent,
@@ -24,6 +27,37 @@ describe("Claude ACP compaction status", () => {
     expect(claudeACPCompactionStatus("\n\nCompacting completed.")).toBe("completed")
     expect(claudeACPCompactionStatus("Compacting failed: too much context")).toBeUndefined()
     expect(claudeACPCompactionStatus("Compacting the answer now.")).toBeUndefined()
+  })
+})
+
+describe("Claude ACP config slash commands", () => {
+  it("parses effort, model, and fast commands", () => {
+    expect(claudeACPConfigCommand("/effort max")).toEqual({ configId: "effort", value: "max" })
+    expect(claudeACPConfigCommand("/effort")).toEqual({ configId: "effort", value: undefined })
+    expect(claudeACPConfigCommand("/model opus")).toEqual({ configId: "model", value: "opus" })
+    expect(claudeACPConfigCommand("/fast on")).toEqual({ configId: "fast", value: "on" })
+    expect(claudeACPConfigCommand("not a command")).toBeUndefined()
+    expect(claudeACPConfigCommand("/compact")).toBeUndefined()
+  })
+
+  it("reads select and boolean config option values", () => {
+    expect(
+      claudeACPConfigOptionValues({
+        id: "effort",
+        name: "Effort",
+        type: "select",
+        currentValue: "default",
+        options: [
+          { value: "default", name: "Default" },
+          { value: "max", name: "Max" },
+        ],
+      }),
+    ).toEqual(["default", "max"])
+    expect(claudeACPConfigOptionCurrent({ id: "fast", name: "Fast", type: "boolean", currentValue: true })).toBe("on")
+    expect(claudeACPConfigOptionValues({ id: "fast", name: "Fast", type: "boolean", currentValue: false })).toEqual([
+      "on",
+      "off",
+    ])
   })
 })
 

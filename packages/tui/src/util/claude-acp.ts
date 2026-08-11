@@ -32,6 +32,11 @@ export const ClaudeACPSlashCommands: readonly ClaudeACPSlashCommand[] = [
     description: "Set Claude Code reasoning effort",
   },
   {
+    name: "fast",
+    hint: "[on|off]",
+    description: "Toggle Claude Code fast mode",
+  },
+  {
     name: "heapdump",
     description: "Dump the JS heap to Desktop",
   },
