@@ -38,7 +38,7 @@ import { DialogStash } from "../dialog-stash"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { FilePart, UserMessage } from "@opencode-ai/sdk/v2"
-import { ClaudeACPProviderID, isClaudeACPSlashCommand } from "../../util/claude-acp"
+import { ClaudeACPProviderID, claudeACPFooterState, isClaudeACPSlashCommand } from "../../util/claude-acp"
 import { Locale } from "../../util/locale"
 import { assistantContextTokens, latestAssistantContextMessage } from "../../util/session"
 import { errorMessage } from "../../util/error"
@@ -1309,10 +1309,26 @@ export function Prompt(props: PromptProps) {
     return !!current
   })
 
+  const claudeAcpFooter = createMemo(() => {
+    if (local.model.current()?.providerID !== ClaudeACPProviderID) return
+    if (!props.sessionID) return
+    return claudeACPFooterState(sync.session.get(props.sessionID)?.metadata)
+  })
+
+  const showClaudeAcpEffort = createMemo(() => !!claudeAcpFooter()?.effort)
+  const showClaudeAcpFast = createMemo(() => claudeAcpFooter()?.fast === true)
+
   const agentMetaAlpha = createFadeIn(() => !!local.agent.current(), animationsEnabled)
   const modelMetaAlpha = createFadeIn(() => !!local.agent.current() && store.mode === "normal", animationsEnabled)
   const variantMetaAlpha = createFadeIn(
     () => !!local.agent.current() && store.mode === "normal" && showVariant(),
+    animationsEnabled,
+  )
+  const claudeAcpMetaAlpha = createFadeIn(
+    () =>
+      !!local.agent.current() &&
+      store.mode === "normal" &&
+      (showClaudeAcpEffort() || showClaudeAcpFast()),
     animationsEnabled,
   )
   const borderHighlight = createMemo(() => tint(theme.border, highlight(), agentMetaAlpha()))
@@ -1470,6 +1486,22 @@ export function Prompt(props: PromptProps) {
                           >
                             {local.model.parsed().model}
                           </text>
+                          <Show when={showClaudeAcpEffort()}>
+                            <text fg={fadeColor(theme.textMuted, claudeAcpMetaAlpha())}>·</text>
+                            <text>
+                              <span style={{ fg: fadeColor(theme.warning, claudeAcpMetaAlpha()), bold: true }}>
+                                {claudeAcpFooter()?.effort}
+                              </span>
+                            </text>
+                          </Show>
+                          <Show when={showClaudeAcpFast()}>
+                            <text fg={fadeColor(theme.textMuted, claudeAcpMetaAlpha())}>·</text>
+                            <text>
+                              <span style={{ fg: fadeColor(theme.warning, claudeAcpMetaAlpha()), bold: true }}>
+                                fast
+                              </span>
+                            </text>
+                          </Show>
                           <Show when={currentProviderLabel()}>
                             {(provider) => <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{provider()}</text>}
                           </Show>

@@ -93,3 +93,19 @@ const ClaudeACPSlashCommandNames = new Set<string>(ClaudeACPSlashCommands.map((c
 export function isClaudeACPSlashCommand(command: string) {
   return ClaudeACPSlashCommandNames.has(command.replace(/^\//, ""))
 }
+
+export type ClaudeACPFooterState = {
+  readonly effort?: string
+  readonly fast?: boolean
+}
+
+export function claudeACPFooterState(metadata: Record<string, unknown> | undefined): ClaudeACPFooterState {
+  const raw = metadata?.claudeAcp
+  if (!raw || typeof raw !== "object") return {}
+  const effort = "effort" in raw && typeof raw.effort === "string" && raw.effort !== "default" ? raw.effort : undefined
+  const fast = "fast" in raw && raw.fast === true
+  return {
+    ...(effort ? { effort } : {}),
+    ...(fast ? { fast: true } : {}),
+  }
+}

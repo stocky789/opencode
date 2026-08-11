@@ -47,6 +47,11 @@ type QuestionBridge = {
   readonly ask: (input: Parameters<Question.Interface["ask"]>[0]) => Promise<ReadonlyArray<Question.Answer>>
 }
 
+export type ClaudeACPConfigState = {
+  readonly effort?: string
+  readonly fast?: boolean
+}
+
 type StreamInput = {
   readonly cwd: string
   readonly sessionID: PermissionV1.AskInput["sessionID"]
@@ -58,6 +63,7 @@ type StreamInput = {
   readonly ruleset: PermissionV1.Ruleset
   readonly permission: PermissionBridge
   readonly question: QuestionBridge
+  readonly onConfig?: (config: ClaudeACPConfigState) => Promise<void>
 }
 
 type Terminal = {
@@ -216,10 +222,12 @@ async function* run(input: StreamInput) {
           tools: new Map(),
         }
         try {
+          await publishConfig(input, activeConnection)
           const commandText = currentPromptText(input.messages)
           const command = claudeACPConfigCommand(commandText)
           if (command) {
             const message = await applyConfigCommand(activeConnection, command)
+            await publishConfig(input, activeConnection)
             activeConnection.active?.queue.text(message)
             finish(queue, "stop")
             return
@@ -485,6 +493,20 @@ export function claudeACPConfigOptionCurrent(option: SessionConfigOption | undef
   if (!option) return
   if (option.type === "boolean") return option.currentValue ? "on" : "off"
   if (typeof option.currentValue === "string") return option.currentValue
+}
+
+export function claudeACPConfigState(configOptions: readonly SessionConfigOption[]): ClaudeACPConfigState {
+  const effort = claudeACPConfigOptionCurrent(configOptions.find((item) => item.id === "effort"))
+  const fast = claudeACPConfigOptionCurrent(configOptions.find((item) => item.id === "fast"))
+  return {
+    ...(effort ? { effort } : {}),
+    ...(fast !== undefined ? { fast: fast === "on" } : {}),
+  }
+}
+
+async function publishConfig(input: StreamInput, connection: Connection) {
+  if (!input.onConfig) return
+  await input.onConfig(claudeACPConfigState(connection.configOptions))
 }
 
 async function applyConfigCommand(connection: Connection, command: ClaudeACPConfigCommand) {
