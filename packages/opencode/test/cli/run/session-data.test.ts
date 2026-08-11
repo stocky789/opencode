@@ -333,7 +333,7 @@ describe("run session data", () => {
     expect(aborted.data.usage?.text).toBe("40.6K")
   })
 
-  test("allows aborted footer usage to increase previous completed usage", () => {
+  test("ignores an aborted estimate even when it exceeds previous completed usage", () => {
     let data = createSessionData()
     data = reduce(
       data,
@@ -361,11 +361,44 @@ describe("run session data", () => {
       }),
     )
 
-    expect(aborted.footer?.patch?.usage).toBe("57.5K")
-    expect(aborted.data.usage?.text).toBe("57.5K")
+    expect(aborted.footer?.patch?.usage).toBeUndefined()
+    expect(aborted.data.usage?.text).toBe("40.6K")
   })
 
-  test("does not lower footer usage when a later completed turn reports fewer tokens", () => {
+  test("follows an aborted turn with a provider-reported total", () => {
+    let data = createSessionData()
+    data = reduce(
+      data,
+      assistant("msg-1", {
+        tokens: {
+          total: 40_578,
+          input: 38,
+          output: 6_476,
+          reasoning: 0,
+          cache: { read: 109_805, write: 15_824 },
+        },
+      }),
+    ).data
+
+    const aborted = reduce(
+      data,
+      assistant("msg-2", {
+        error: { name: "MessageAbortedError" },
+        tokens: {
+          total: 13_278,
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      }),
+    )
+
+    expect(aborted.footer?.patch?.usage).toBe("13.3K")
+    expect(aborted.data.usage?.text).toBe("13.3K")
+  })
+
+  test("lowers footer usage when a later completed turn reports fewer tokens", () => {
     let data = createSessionData()
     const first = reduce(
       data,
@@ -395,8 +428,8 @@ describe("run session data", () => {
     )
 
     expect(first.footer?.patch?.usage).toBe("44.0K")
-    expect(later.footer?.patch?.usage).toBeUndefined()
-    expect(later.data.usage?.text).toBe("44.0K")
+    expect(later.footer?.patch?.usage).toBe("29.2K")
+    expect(later.data.usage?.text).toBe("29.2K")
   })
 
   test("shows aborted footer usage when no completed usage exists", () => {

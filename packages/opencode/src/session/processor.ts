@@ -243,6 +243,9 @@ const layer = Layer.effect(
         const usage = {
           cost: 0,
           tokens: {
+            // A provider-reported context total survives the interrupt; the
+            // local estimate only fills in the missing breakdown.
+            ...(ctx.assistantMessage.tokens.total !== undefined ? { total: ctx.assistantMessage.tokens.total } : {}),
             input: ctx.interruptedInputTokens,
             output: Token.estimate(
               JSON.stringify(
@@ -540,6 +543,21 @@ const layer = Layer.effect(
             ) {
               ctx.needsCompaction = true
             }
+            return
+          }
+
+          case "usage": {
+            // Live context-occupancy snapshot (ACP usage_update). Last write
+            // wins, and values may drop after provider-side compaction — only
+            // step-finish touches cost/finish, so just refresh the tokens.
+            const usage = Session.getUsage({
+              model: ctx.model,
+              usage: value.usage,
+              metadata: value.usage.providerMetadata,
+            })
+            if ((usage.tokens.total ?? tokenTotal(usage.tokens)) <= 0) return
+            ctx.assistantMessage.tokens = usage.tokens
+            yield* session.updateMessage(ctx.assistantMessage)
             return
           }
 

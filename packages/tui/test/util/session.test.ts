@@ -42,7 +42,61 @@ describe("util.session", () => {
     expect(assistantContextTokens(message)).toBe(67_152)
   })
 
-  test("prefers previous completed usage over a later aborted estimate", () => {
+  test("prefers previous reported usage over a later interrupt estimate", () => {
+    const completed = {
+      id: "completed",
+      role: "assistant",
+      tokens: {
+        total: 143_725,
+        input: 143_000,
+        output: 725,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    } as AssistantMessage
+    const estimated = {
+      id: "estimated",
+      role: "assistant",
+      error: { name: "MessageAbortedError" },
+      tokens: {
+        input: 13_000,
+        output: 278,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    } as AssistantMessage
+
+    expect(latestAssistantContextMessage([completed, estimated] as Message[])?.id).toBe("completed")
+  })
+
+  test("follows a later smaller reported usage (provider compacted its context)", () => {
+    const beforeCompaction = {
+      id: "before",
+      role: "assistant",
+      tokens: {
+        total: 156_044,
+        input: 106,
+        output: 8_740,
+        reasoning: 0,
+        cache: { read: 124_001, write: 22_516 },
+      },
+    } as AssistantMessage
+    const afterCompaction = {
+      id: "after",
+      role: "assistant",
+      tokens: {
+        total: 29_240,
+        input: 10,
+        output: 450,
+        reasoning: 0,
+        cache: { read: 21_158, write: 7_622 },
+      },
+    } as AssistantMessage
+
+    expect(latestAssistantContextMessage([beforeCompaction, afterCompaction] as Message[])?.id).toBe("after")
+  })
+
+  test("follows a reported total on an aborted turn", () => {
     const completed = {
       id: "completed",
       role: "assistant",
@@ -60,36 +114,9 @@ describe("util.session", () => {
       error: { name: "MessageAbortedError" },
       tokens: {
         total: 13_278,
-        input: 13_000,
-        output: 278,
+        input: 0,
+        output: 0,
         reasoning: 0,
-        cache: { read: 0, write: 0 },
-      },
-    } as AssistantMessage
-
-    expect(latestAssistantContextMessage([completed, aborted] as Message[])?.id).toBe("completed")
-  })
-
-  test("uses later aborted usage when it exceeds previous completed usage", () => {
-    const completed = {
-      id: "completed",
-      role: "assistant",
-      tokens: {
-        total: 40_578,
-        input: 38,
-        output: 6_476,
-        reasoning: 0,
-        cache: { read: 109_805, write: 15_824 },
-      },
-    } as AssistantMessage
-    const aborted = {
-      id: "aborted",
-      role: "assistant",
-      error: { name: "MessageAbortedError" },
-      tokens: {
-        input: 55_000,
-        output: 2_000,
-        reasoning: 500,
         cache: { read: 0, write: 0 },
       },
     } as AssistantMessage
@@ -97,40 +124,12 @@ describe("util.session", () => {
     expect(latestAssistantContextMessage([completed, aborted] as Message[])?.id).toBe("aborted")
   })
 
-  test("keeps the largest completed usage instead of a later smaller completed turn", () => {
-    const larger = {
-      id: "larger",
-      role: "assistant",
-      tokens: {
-        total: 44_044,
-        input: 106,
-        output: 8_740,
-        reasoning: 0,
-        cache: { read: 451_001, write: 22_516 },
-      },
-    } as AssistantMessage
-    const smaller = {
-      id: "smaller",
-      role: "assistant",
-      tokens: {
-        total: 29_240,
-        input: 10,
-        output: 450,
-        reasoning: 0,
-        cache: { read: 21_158, write: 7_622 },
-      },
-    } as AssistantMessage
-
-    expect(latestAssistantContextMessage([larger, smaller] as Message[])?.id).toBe("larger")
-  })
-
-  test("uses aborted usage when there is no completed assistant usage", () => {
-    const aborted = {
-      id: "aborted",
+  test("uses an interrupt estimate when no reported assistant usage exists", () => {
+    const estimated = {
+      id: "estimated",
       role: "assistant",
       error: { name: "MessageAbortedError" },
       tokens: {
-        total: 13_278,
         input: 13_000,
         output: 278,
         reasoning: 0,
@@ -138,6 +137,6 @@ describe("util.session", () => {
       },
     } as AssistantMessage
 
-    expect(latestAssistantContextMessage([aborted] as Message[])?.id).toBe("aborted")
+    expect(latestAssistantContextMessage([estimated] as Message[])?.id).toBe("estimated")
   })
 })

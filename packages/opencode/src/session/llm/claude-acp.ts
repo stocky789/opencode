@@ -468,7 +468,15 @@ function sessionUpdate(connection: Connection, params: SessionNotification) {
   if (params.update.sessionUpdate === "usage_update") {
     const used = token(params.update.used)
     const size = token(params.update.size)
-    if (used !== undefined && size !== undefined) active.contextUsage = { used, size }
+    // The adapter sends used: 0 only as a fallback when its post-compaction
+    // context probe fails — never as a real measurement (the system prompt
+    // alone occupies tokens) — so hold the last report instead of wiping it.
+    if (!used || !size) return
+    active.contextUsage = { used, size }
+    // Claude Code reports context occupancy as it changes (including the drop
+    // after its internal compaction) — stream it so the meter moves live.
+    const usage = claudeContextUsage(active.contextUsage)
+    if (usage) active.queue.push(LLMEvent.usage(usage))
     return
   }
   if (params.update.sessionUpdate === "agent_message_chunk" && params.update.content.type === "text") {
