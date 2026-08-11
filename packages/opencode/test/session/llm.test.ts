@@ -963,55 +963,6 @@ describe("session.llm.stream", () => {
   )
 
   it.instance(
-    "passes model variant into Claude ACP for effort and fast mode",
-    () =>
-      Effect.gen(function* () {
-        const ctx = yield* InstanceRef
-        if (!ctx) return yield* Effect.die("InstanceRef not provided")
-        const resolved = yield* Provider.use.getModel(ClaudeACPProviderID, ClaudeACPModelID)
-        const sessionID = SessionID.make("session-test-claude-acp-variant")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        let captured: Parameters<typeof ClaudeACP.stream>[0] | undefined
-        const stream = spyOn(ClaudeACP, "stream").mockImplementation((input) => {
-          captured = input
-          return claudeACPDone()
-        })
-
-        try {
-          yield* drain({
-            cwd: ctx.directory,
-            user: {
-              id: MessageID.make("msg_user-claude-acp-variant"),
-              sessionID,
-              role: "user",
-              time: { created: Date.now() },
-              agent: agent.name,
-              model: { providerID: ClaudeACPProviderID, modelID: resolved.id, variant: "high-fast" },
-            } satisfies SessionV1.User,
-            sessionID,
-            model: resolved,
-            agent,
-            system: [],
-            messages: [{ role: "user", content: "Hello" }],
-            tools: {},
-          } satisfies LLM.StreamInput & { cwd: string })
-        } finally {
-          stream.mockRestore()
-        }
-
-        expect(captured?.variant).toBe("high-fast")
-        expect(Object.keys(resolved.variants ?? {})).toContain("high-fast")
-        expect(Object.keys(resolved.variants ?? {})).toContain("fast")
-      }),
-    { config: () => ({ enabled_providers: [ClaudeACPProviderID] }) },
-  )
-
-  it.instance(
     "fails explicitly when Claude ACP receives unsupported required toolChoice",
     () =>
       Effect.gen(function* () {

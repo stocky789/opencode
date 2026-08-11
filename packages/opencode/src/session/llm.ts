@@ -147,7 +147,6 @@ const live: Layer.Layer<
             cwd: input.cwd,
             sessionID: input.sessionID,
             modelID: input.model.id,
-            variant: input.user.model.variant,
             agent: input.agent.name,
             mcpServers: claudeMcpServers(cfg),
             messages: claudeACPMessages(input.system, input.messages),

@@ -1064,20 +1064,6 @@ export type Info = Types.DeepMutable<Schema.Schema.Type<typeof Info>>
 export const ClaudeACPProviderID = ProviderV2.ID.make("claude-acp")
 export const ClaudeACPModelID = ModelV2.ID.make("claude")
 
-const CLAUDE_ACP_EFFORTS = ["low", "medium", "high", "max", "auto"] as const
-
-function claudeACPVariants() {
-  const variants: Record<string, Record<string, unknown>> = {
-    default: {},
-    fast: { fast: true },
-  }
-  for (const effort of CLAUDE_ACP_EFFORTS) {
-    variants[effort] = { effort }
-    variants[`${effort}-fast`] = { effort, fast: true }
-  }
-  return variants
-}
-
 function claudeACPModel(id: string, name: string, context = 200_000): Model {
   const modelID = ModelV2.ID.make(id)
   return {
@@ -1127,7 +1113,7 @@ function claudeACPModel(id: string, name: string, context = 200_000): Model {
     options: {},
     headers: {},
     release_date: "2026-07-02",
-    variants: claudeACPVariants(),
+    variants: {},
   }
 }
 

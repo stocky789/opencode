@@ -2,8 +2,6 @@ import { describe, expect, it } from "bun:test"
 import {
   claudeACPAppendOutput,
   claudeACPCompactionStatus,
-  claudeACPConfigFromVariant,
-  claudeACPConfigOptionValues,
   claudeACPConnectionKey,
   claudeACPDirectPermissionChecks,
   claudeACPElicitationContent,
@@ -26,51 +24,6 @@ describe("Claude ACP compaction status", () => {
     expect(claudeACPCompactionStatus("\n\nCompacting completed.")).toBe("completed")
     expect(claudeACPCompactionStatus("Compacting failed: too much context")).toBeUndefined()
     expect(claudeACPCompactionStatus("Compacting the answer now.")).toBeUndefined()
-  })
-})
-
-describe("Claude ACP session config", () => {
-  it("maps OpenCode variants to Claude ACP effort and fast mode", () => {
-    expect(claudeACPConfigFromVariant(undefined)).toEqual({ effort: "default", fast: false })
-    expect(claudeACPConfigFromVariant("default")).toEqual({ effort: "default", fast: false })
-    expect(claudeACPConfigFromVariant("high")).toEqual({ effort: "high", fast: false })
-    expect(claudeACPConfigFromVariant("fast")).toEqual({ effort: "default", fast: true })
-    expect(claudeACPConfigFromVariant("max-fast")).toEqual({ effort: "max", fast: true })
-    expect(claudeACPConfigFromVariant("auto-fast")).toEqual({ effort: "auto", fast: true })
-  })
-
-  it("reads select config option values including grouped options", () => {
-    expect(
-      claudeACPConfigOptionValues({
-        id: "effort",
-        name: "Effort",
-        type: "select",
-        currentValue: "default",
-        options: [
-          { value: "default", name: "Default" },
-          { value: "high", name: "High" },
-        ],
-      }),
-    ).toEqual(["default", "high"])
-
-    expect(
-      claudeACPConfigOptionValues({
-        id: "model",
-        name: "Model",
-        type: "select",
-        currentValue: "sonnet",
-        options: [
-          {
-            group: "claude",
-            name: "Claude",
-            options: [
-              { value: "sonnet", name: "Sonnet" },
-              { value: "opus", name: "Opus" },
-            ],
-          },
-        ],
-      }),
-    ).toEqual(["sonnet", "opus"])
   })
 })
 

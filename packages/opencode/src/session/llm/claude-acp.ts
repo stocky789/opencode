@@ -20,7 +20,6 @@ import type {
   ReleaseTerminalResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
   SessionNotification,
   TerminalOutputRequest,
   TerminalOutputResponse,
@@ -51,7 +50,6 @@ type StreamInput = {
   readonly cwd: string
   readonly sessionID: PermissionV1.AskInput["sessionID"]
   readonly modelID: string
-  readonly variant?: string
   readonly agent: string
   readonly mcpServers: readonly McpServer[]
   readonly messages: ModelMessage[]
@@ -59,17 +57,6 @@ type StreamInput = {
   readonly ruleset: PermissionV1.Ruleset
   readonly permission: PermissionBridge
   readonly question: QuestionBridge
-}
-
-type ClaudeACPSessionConfig = {
-  readonly effort: string
-  readonly fast: boolean
-}
-
-type AppliedSessionConfig = {
-  model?: string
-  effort?: string
-  fast?: boolean
 }
 
 type Terminal = {
@@ -128,8 +115,6 @@ type Connection = {
   readonly stderr: string[]
   readonly terminals: Map<string, Terminal>
   sessionID: string
-  configOptions: SessionConfigOption[]
-  applied: AppliedSessionConfig
   lock: Promise<void>
   used: boolean
   disposed: boolean
@@ -229,7 +214,6 @@ async function* run(input: StreamInput) {
           tools: new Map(),
         }
         try {
-          await syncSessionConfig(activeConnection, input)
           const response = await activeConnection.client.prompt({
             sessionId: activeConnection.sessionID,
             prompt: [
@@ -339,12 +323,10 @@ async function createConnection(input: StreamInput, key: string): Promise<Connec
     stderr,
     terminals,
     sessionID: "",
-    configOptions: [],
-    applied: {},
     lock: Promise.resolve(),
     used: false,
     disposed: false,
-  } as unknown as Connection
+  } as Connection
   activeConnections.add(connection)
   connection.client = new ClientSideConnection(
     () => makeClient(connection),
@@ -374,8 +356,6 @@ async function createConnection(input: StreamInput, key: string): Promise<Connec
     const session = await connection.client.newSession({ cwd: input.cwd, mcpServers: [...input.mcpServers] })
     if (input.abort.aborted) throw abortError()
     connection.sessionID = session.sessionId
-    connection.configOptions = session.configOptions ?? []
-    await syncSessionConfig(connection, input)
     scheduleDispose(connection)
     return connection
   } catch (error) {
@@ -467,78 +447,6 @@ function claudeEnv(modelID: string) {
   }
 }
 
-export function claudeACPConfigFromVariant(variant?: string): ClaudeACPSessionConfig {
-  if (!variant || variant === "default") return { effort: "default", fast: false }
-  if (variant === "fast") return { effort: "default", fast: true }
-  if (variant.endsWith("-fast")) {
-    return { effort: variant.slice(0, -5), fast: true }
-  }
-  return { effort: variant, fast: false }
-}
-
-export function claudeACPConfigOptionValues(option: SessionConfigOption | undefined) {
-  if (!option || option.type !== "select" || !Array.isArray(option.options)) return []
-  return option.options.flatMap((entry) => ("options" in entry ? entry.options : [entry])).map((entry) => entry.value)
-}
-
-async function syncSessionConfig(connection: Connection, input: Pick<StreamInput, "modelID" | "variant">) {
-  if (!connection.sessionID) return
-  const desired = claudeACPConfigFromVariant(input.variant)
-  const model = claudeModelID(input.modelID)
-
-  if (model && hasConfigOption(connection, "model") && connection.applied.model !== model) {
-    // Claude ACP resolves aliases like "opus"/"sonnet" to the active model ID.
-    await setConfigOption(connection, "model", model)
-    connection.applied.model = model
-  }
-
-  if (hasConfigOption(connection, "effort") && connection.applied.effort !== desired.effort) {
-    const allowed = claudeACPConfigOptionValues(configOption(connection, "effort"))
-    if (allowed.includes(desired.effort)) {
-      await setConfigOption(connection, "effort", desired.effort)
-      connection.applied.effort = desired.effort
-    }
-  }
-
-  if (hasConfigOption(connection, "fast") && connection.applied.fast !== desired.fast) {
-    await setFastMode(connection, desired.fast)
-    connection.applied.fast = desired.fast
-  }
-}
-
-function configOption(connection: Connection, id: string) {
-  return connection.configOptions.find((option) => option.id === id)
-}
-
-function hasConfigOption(connection: Connection, id: string) {
-  return !!configOption(connection, id)
-}
-
-async function setConfigOption(connection: Connection, configId: string, value: string) {
-  const response = await connection.client.setSessionConfigOption({
-    sessionId: connection.sessionID,
-    configId,
-    value,
-  })
-  connection.configOptions = response.configOptions ?? connection.configOptions
-}
-
-async function setFastMode(connection: Connection, enabled: boolean) {
-  const option = configOption(connection, "fast")
-  if (!option) return
-  if (option.type === "boolean") {
-    const response = await connection.client.setSessionConfigOption({
-      sessionId: connection.sessionID,
-      configId: "fast",
-      type: "boolean",
-      value: enabled,
-    })
-    connection.configOptions = response.configOptions ?? connection.configOptions
-    return
-  }
-  await setConfigOption(connection, "fast", enabled ? "on" : "off")
-}
-
 function makeClient(connection: Connection): Client {
   return {
     sessionUpdate: async (params: SessionNotification) => sessionUpdate(connection, params),
@@ -555,10 +463,6 @@ function makeClient(connection: Connection): Client {
 }
 
 function sessionUpdate(connection: Connection, params: SessionNotification) {
-  if (params.update.sessionUpdate === "config_option_update") {
-    connection.configOptions = params.update.configOptions ?? connection.configOptions
-    return
-  }
   const active = connection.active
   if (!active) return
   if (params.update.sessionUpdate === "usage_update") {
