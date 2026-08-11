@@ -617,7 +617,11 @@ function makeUsageService(sdk: OpencodeClient) {
         })
         .catch(() => undefined)
       limits.set(key, next)
-      return yield* Effect.promise(() => next)
+      const value = yield* Effect.promise(() => next)
+      // An unknown limit must not stick: evict the failed lookup so the next
+      // usage update retries instead of never reporting again.
+      if (value === undefined && limits.get(key) === next) limits.delete(key)
+      return value
     },
   )
 
@@ -884,6 +888,10 @@ function promptErrorMessage(error: AssistantError) {
   return "OpenCode prompt failed"
 }
 
+// One usage service per SDK client so the context-limit cache survives across
+// updates — rebuilding it per call would refetch providers on every update.
+const usageServices = new WeakMap<OpencodeClient, UsageService.Interface>()
+
 function sendUsageUpdate(
   usage: UsageService.Interface | undefined,
   sdk: OpencodeClient,
@@ -892,7 +900,12 @@ function sendUsageUpdate(
   directory: string,
 ) {
   if (!connection) return Effect.void
-  return (usage ?? makeUsageService(sdk)).sendUpdate({
+  let service = usage ?? usageServices.get(sdk)
+  if (!service) {
+    service = makeUsageService(sdk)
+    usageServices.set(sdk, service)
+  }
+  return service.sendUpdate({
     connection,
     sessionID,
     directory,

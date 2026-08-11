@@ -90,7 +90,7 @@ export type SessionData = {
   usage: {
     text: string
     tokens: number
-    aborted: boolean
+    estimated: boolean
   } | undefined
 }
 
@@ -194,13 +194,15 @@ function isAbort(error: { name?: string } | undefined): boolean {
   return error?.name === "MessageAbortedError"
 }
 
-function updateUsage(data: SessionData, usage: { text: string; tokens: number } | undefined, aborted: boolean) {
+// Last write wins: reported usage moves the meter in both directions (context
+// shrinks when the provider compacts its own history). Interrupt estimates
+// (aborted turns without a provider-reported total) only ever fill a void —
+// they never displace a reported value.
+function updateUsage(data: SessionData, usage: { text: string; tokens: number } | undefined, estimated: boolean) {
   if (!usage) return undefined
-  if (!data.usage || usage.tokens >= data.usage.tokens) {
-    data.usage = { ...usage, aborted }
-    return usage.text
-  }
-  return undefined
+  if (estimated && data.usage && !data.usage.estimated) return undefined
+  data.usage = { ...usage, estimated }
+  return usage.text
 }
 
 function msgErr(id: string): string {
@@ -865,7 +867,7 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
       input.limits[modelKey(info.providerID, info.modelID)],
       typeof info.cost === "number" ? info.cost : undefined,
     )
-    const nextUsage = updateUsage(data, usage, isAbort(info.error))
+    const nextUsage = updateUsage(data, usage, isAbort(info.error) && info.tokens?.total === undefined)
     if (nextUsage) {
       next = {
         ...next,
