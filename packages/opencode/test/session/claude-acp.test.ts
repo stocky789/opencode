@@ -6,6 +6,7 @@ import {
   claudeACPConfigOptionCurrent,
   claudeACPConfigOptionValues,
   claudeACPConnectionKey,
+  resolveFastDesired,
   claudeACPDirectPermissionChecks,
   claudeACPElicitationContent,
   claudeACPElicitationFields,
@@ -38,6 +39,15 @@ describe("Claude ACP config slash commands", () => {
     expect(claudeACPConfigCommand("/fast on")).toEqual({ configId: "fast", value: "on" })
     expect(claudeACPConfigCommand("not a command")).toBeUndefined()
     expect(claudeACPConfigCommand("/compact")).toBeUndefined()
+  })
+
+  it("resolves fast mode desired state like Claude Code toggles", () => {
+    expect(resolveFastDesired(undefined, undefined)).toBe(true)
+    expect(resolveFastDesired(undefined, "off")).toBe(true)
+    expect(resolveFastDesired(undefined, "on")).toBe(false)
+    expect(resolveFastDesired("on", "off")).toBe(true)
+    expect(resolveFastDesired("off", "on")).toBe(false)
+    expect(resolveFastDesired("nope", "off")).toBe("invalid")
   })
 
   it("reads select and boolean config option values", () => {

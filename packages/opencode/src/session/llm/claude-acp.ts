@@ -488,6 +488,8 @@ export function claudeACPConfigOptionCurrent(option: SessionConfigOption | undef
 }
 
 async function applyConfigCommand(connection: Connection, command: ClaudeACPConfigCommand) {
+  if (command.configId === "fast") return applyFastCommand(connection, command.value)
+
   const option = connection.configOptions.find((item) => item.id === command.configId)
   if (!option) {
     return `${labelForConfig(command.configId)} isn't available for the current Claude Code session.`
@@ -500,7 +502,7 @@ async function applyConfigCommand(connection: Connection, command: ClaudeACPConf
     return `${labelForConfig(command.configId)} is currently ${current ?? "unset"}. Available: ${choices}`
   }
 
-  const value = resolveConfigValue(command, allowed, current)
+  const value = resolveConfigValue(command, allowed)
   if (!value) {
     return `Invalid ${command.configId} value "${command.value}". Available: ${allowed.join(", ") || "none"}`
   }
@@ -511,20 +513,56 @@ async function applyConfigCommand(connection: Connection, command: ClaudeACPConf
   return `${labelForConfig(command.configId)} set to ${next ?? value}`
 }
 
-function resolveConfigValue(command: ClaudeACPConfigCommand, allowed: string[], current: string | undefined) {
-  if (!command.value) return
-  if (command.configId === "fast") {
-    if (command.value === "on" || command.value === "true" || command.value === "1") return pickAllowed(allowed, "on")
-    if (command.value === "off" || command.value === "false" || command.value === "0") return pickAllowed(allowed, "off")
-    if (command.value === "toggle") return current === "on" ? pickAllowed(allowed, "off") : pickAllowed(allowed, "on")
+async function applyFastCommand(connection: Connection, raw?: string) {
+  const current = () => claudeACPConfigOptionCurrent(configOption(connection, "fast"))
+  const desired = resolveFastDesired(raw, current())
+  if (desired === "invalid") {
+    return `Invalid fast value "${raw}". Use on, off, or omit a value to toggle.`
   }
+
+  if (desired === false) {
+    const option = configOption(connection, "fast")
+    if (!option || current() !== "on") return "Fast mode OFF"
+    await setConfigOption(connection, "fast", "off", option)
+    return "Fast mode OFF"
+  }
+
+  // Claude Code switches to Opus when enabling fast mode on an unsupported model.
+  let option = configOption(connection, "fast")
+  if (!option) {
+    const model = configOption(connection, "model")
+    if (!model) {
+      return "Fast mode isn't available for the current Claude Code session."
+    }
+    await setConfigOption(connection, "model", "opus", model)
+    option = configOption(connection, "fast")
+    if (!option) {
+      return "Switched to Opus, but Fast mode still isn't available. It may be disabled for your account or organization."
+    }
+  }
+
+  if (current() === "on") return "Fast mode ON"
+  await setConfigOption(connection, "fast", "on", option)
+  return "Fast mode ON"
+}
+
+export function resolveFastDesired(raw: string | undefined, current: string | undefined) {
+  if (!raw) return current !== "on"
+  if (raw === "on" || raw === "true" || raw === "1") return true
+  if (raw === "off" || raw === "false" || raw === "0") return false
+  if (raw === "toggle") return current !== "on"
+  return "invalid"
+}
+
+function configOption(connection: Connection, id: string) {
+  return connection.configOptions.find((item) => item.id === id)
+}
+
+function resolveConfigValue(command: ClaudeACPConfigCommand, allowed: string[]) {
+  if (!command.value) return
   if (allowed.includes(command.value)) return command.value
   // Model aliases are resolved by Claude ACP when the exact ID is absent.
   if (command.configId === "model") return command.value
-}
-
-function pickAllowed(allowed: string[], value: string) {
-  return allowed.includes(value) ? value : undefined
 }
 
 function labelForConfig(configId: ClaudeACPConfigCommand["configId"]) {
